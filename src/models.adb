@@ -417,7 +417,26 @@ package body Models is
    --  The vehicles
    ---------------------------------------------------------------------------
 
-   procedure Vehicle (B, Glow : in out Buffer; O : V3; H : Float; Paint : Color; Alpha : Float := 1.0) is
+   --  A digit of seven bars, lying flat at height U, its top towards Fwd
+   procedure Digit (B : in out Buffer; O, Fwd : V3; F, U, S, Size : Float; D : Natural; C : Color) is
+      Segs : constant array (0 .. 9) of String (1 .. 7) :=
+        ("1111110", "0110000", "1101101", "1111001", "0110011", "1011011", "1011111", "1110000", "1111111", "1111011");
+      W : constant Float := Size * 0.55;
+      T : constant Float := Size * 0.09;
+      function On (K : Positive) return Boolean is (Segs (D mod 10) (K) = '1');
+   begin
+      --  a top, b top right, c bottom right, d bottom, e bottom left, f top left, g middle
+      if On (1) then Block (B, O, Fwd, F + Size, U, S, T, 0.08, W / 2.0, C); end if;
+      if On (2) then Block (B, O, Fwd, F + Size / 2.0, U, S + W / 2.0, Size / 2.0, 0.08, T, C); end if;
+      if On (3) then Block (B, O, Fwd, F - Size / 2.0, U, S + W / 2.0, Size / 2.0, 0.08, T, C); end if;
+      if On (4) then Block (B, O, Fwd, F - Size, U, S, T, 0.08, W / 2.0, C); end if;
+      if On (5) then Block (B, O, Fwd, F - Size / 2.0, U, S - W / 2.0, Size / 2.0, 0.08, T, C); end if;
+      if On (6) then Block (B, O, Fwd, F + Size / 2.0, U, S - W / 2.0, Size / 2.0, 0.08, T, C); end if;
+      if On (7) then Block (B, O, Fwd, F, U, S, T, 0.08, W / 2.0, C); end if;
+   end Digit;
+
+   procedure Vehicle (B, Glow : in out Buffer; O : V3; H : Float; Paint : Color; Alpha : Float := 1.0;
+                      Style : Car_Style := 0; Number : Natural := 0) is
       Fwd : constant V3 := Dir3 (H);
       function K (C : Color) return Color is ((C.R, C.G, C.B, C.A * Alpha));
       P : constant Color := K (Paint);
@@ -434,24 +453,91 @@ package body Models is
       end Wheel;
    begin
       case Vehicle is
-         when Car | Rover =>
+         when Car =>
+            declare
+               Sd : constant V3 := Side_Of (Fwd);
+               White_K : constant Color := K ((0.96, 0.96, 0.96, 1.0));
+               Roof : Float := 11.8;   --  where the number goes
+               Roof_F : Float := -2.0;
+            begin
+               case Style is
+                  when 0 =>
+                     --  a racer: low, rounded at the nose and tail, a bubble of glass, a wing behind
+                     Block (B, O, Fwd, 0.0, 4.6, 0.0, 10.0, 2.4, 6.0, P);
+                     Barrel (B, O + 10.0 * Fwd + (0.0, 4.6, 0.0), Sd, 2.4, 6.0, P, 12);
+                     Barrel (B, O + (-10.0) * Fwd + (0.0, 4.6, 0.0), Sd, 2.4, 6.0, P, 12);
+                     Dome (B, O + (-1.5) * Fwd + (0.0, 6.9, 0.0), 6.5, 4.6, H, 4.2, Gl, 0.0, 14);
+                     Block (B, O, Fwd, -12.0, 9.5, 0.0, 1.6, 0.3, 6.4, Dark);
+                     Block (B, O, Fwd, -11.6, 8.2, 3.5, 0.5, 1.4, 0.4, Dark);
+                     Block (B, O, Fwd, -11.6, 8.2, -3.5, 0.5, 1.4, 0.4, Dark);
+                     Block (B, O, Fwd, 0.0, 7.05, 0.0, 12.4, 0.06, 1.2, White_K);   --  the stripe
+                     Roof := 7.1;
+                     Roof_F := 7.0;
+                  when 1 =>
+                     --  a beetle: all curves
+                     Dome (B, O + (0.0, 3.0, 0.0), 12.5, 6.4, H, 6.0, P, 0.0, 18);
+                     Block (B, O, Fwd, 0.0, 3.0, 0.0, 12.0, 1.4, 6.2, Shade (P, 0.85));
+                     Dome (B, O + (-1.5) * Fwd + (0.0, 7.0, 0.0), 6.2, 5.0, H, 4.8, Gl, 0.0, 14);
+                     Dome (B, O + (-1.5) * Fwd + (0.0, 7.4, 0.0), 5.4, 4.4, H, 4.6, P, 0.0, 14);
+                     Roof := 12.05;
+                     Roof_F := -1.5;
+                  when 2 =>
+                     --  a van: tall, a rounded roof, a band of windows
+                     Block (B, O, Fwd, 0.0, 6.5, 0.0, 12.0, 4.2, 6.0, P);
+                     Barrel (B, O + (0.0, 10.7, 0.0), Fwd, 5.9, 11.9, P, 14);
+                     Block (B, O, Fwd, 0.0, 9.5, 0.0, 10.5, 1.4, 6.05, Gl);
+                     Block (B, O, Fwd, 11.6, 8.6, 0.0, 0.6, 2.2, 5.0, Gl);
+                     Block (B, O, Fwd, 0.0, 4.0, 0.0, 12.05, 0.5, 6.05, White_K);
+                     Roof := 16.65;
+                     Roof_F := 0.0;
+                  when others =>
+                     --  a sports car: a long low nose, the glass swept back
+                     Block (B, O, Fwd, 1.0, 4.2, 0.0, 11.5, 2.0, 6.0, P);
+                     Quad (B, O + 4.0 * Fwd + (0.0, 6.2, 0.0) + 5.6 * Sd, O + 4.0 * Fwd + (0.0, 6.2, 0.0) - 5.6 * Sd,
+                           O + (-1.0) * Fwd + (0.0, 9.8, 0.0) - 5.0 * Sd, O + (-1.0) * Fwd + (0.0, 9.8, 0.0) + 5.0 * Sd, Gl);
+                     Quad (B, O + (-1.0) * Fwd + (0.0, 9.8, 0.0) + 5.0 * Sd, O + (-1.0) * Fwd + (0.0, 9.8, 0.0) - 5.0 * Sd,
+                           O + (-10.5) * Fwd + (0.0, 6.2, 0.0) - 5.6 * Sd, O + (-10.5) * Fwd + (0.0, 6.2, 0.0) + 5.6 * Sd, P);
+                     Tri (B, O + 4.0 * Fwd + (0.0, 6.2, 0.0) + 5.6 * Sd, O + (-1.0) * Fwd + (0.0, 9.8, 0.0) + 5.0 * Sd,
+                          O + (-10.5) * Fwd + (0.0, 6.2, 0.0) + 5.6 * Sd, Gl);
+                     Tri (B, O + 4.0 * Fwd + (0.0, 6.2, 0.0) - 5.6 * Sd, O + (-1.0) * Fwd + (0.0, 9.8, 0.0) - 5.0 * Sd,
+                          O + (-10.5) * Fwd + (0.0, 6.2, 0.0) - 5.6 * Sd, Gl);
+                     Block (B, O, Fwd, -11.5, 7.2, 0.0, 1.2, 0.25, 6.2, Dark);
+                     Block (B, O, Fwd, 1.0, 6.25, 2.0, 11.5, 0.05, 0.7, White_K);
+                     Block (B, O, Fwd, 1.0, 6.25, -2.0, 11.5, 0.05, 0.7, White_K);
+                     Roof := 6.3;
+                     Roof_F := 8.0;
+               end case;
+               Block (B, O, Fwd, 12.1, 5.2, 3.8, 0.3, 0.9, 1.4, La);
+               Block (B, O, Fwd, 12.1, 5.2, -3.8, 0.3, 0.9, 1.4, La);
+               Block (B, O, Fwd, -12.1, 5.2, 4.0, 0.3, 0.7, 1.2, K ((0.9, 0.1, 0.1, 1.0)));
+               Block (B, O, Fwd, -12.1, 5.2, -4.0, 0.3, 0.7, 1.2, K ((0.9, 0.1, 0.1, 1.0)));
+               for Side in -1 .. 1 loop
+                  if Side /= 0 then
+                     Wheel (7.5, Float (Side) * 6.2, 3.0, 1.4);
+                     Wheel (-7.5, Float (Side) * 6.2, 3.0, 1.4);
+                     --  silver hubs
+                     Barrel (B, O + 7.5 * Fwd + (Float (Side) * 7.65) * Sd + (0.0, 3.0, 0.0), Sd, 1.3, 0.1, Me, 8);
+                     Barrel (B, O + (-7.5) * Fwd + (Float (Side) * 7.65) * Sd + (0.0, 3.0, 0.0), Sd, 1.3, 0.1, Me, 8);
+                  end if;
+               end loop;
+               if Number > 0 then
+                  --  a white roundel with the number on it
+                  Cylinder (B, O + Roof_F * Fwd, 3.0, 3.0, 0.0, O.Y + Roof - 0.05, O.Y + Roof + 0.05, White_K, 0.0, 14);
+                  Digit (B, O, Fwd, Roof_F, Roof + 0.1, 0.0, 1.7, Number, K ((0.05, 0.05, 0.05, 1.0)));
+               end if;
+            end;
+         when Rover =>
             Block (B, O, Fwd, 0.0, 5.0, 0.0, 12.0, 2.8, 6.0, P);
             Block (B, O, Fwd, -2.0, 9.6, 0.0, 6.0, 1.8, 5.0, Gl);
             Block (B, O, Fwd, -2.0, 11.6, 0.0, 6.2, 0.4, 5.2, P);
-            Block (B, O, Fwd, 11.6, 5.6, 3.8, 0.6, 1.0, 1.4, La);
-            Block (B, O, Fwd, 11.6, 5.6, -3.8, 0.6, 1.0, 1.4, La);
             for Side in -1 .. 1 loop
                if Side /= 0 then
                   Wheel (7.5, Float (Side) * 6.2, 3.0, 1.4);
                   Wheel (-7.5, Float (Side) * 6.2, 3.0, 1.4);
-                  if Vehicle = Rover then
-                     Wheel (0.0, Float (Side) * 6.2, 3.0, 1.4);
-                  end if;
+                  Wheel (0.0, Float (Side) * 6.2, 3.0, 1.4);
                end if;
             end loop;
-            if Vehicle = Rover then
-               Barrel (B, O + (-4.0) * Fwd + (0.0, 14.0, 0.0), Side_Of (Fwd), 0.4, 4.0, Me, 6);
-            end if;
+            Barrel (B, O + (-4.0) * Fwd + (0.0, 14.0, 0.0), Side_Of (Fwd), 0.4, 4.0, Me, 6);
          when Kart =>
             Block (B, O, Fwd, 0.0, 2.5, 0.0, 11.0, 1.2, 5.0, P);
             Block (B, O, Fwd, -6.0, 5.5, 0.0, 2.0, 3.0, 3.0, Dark);

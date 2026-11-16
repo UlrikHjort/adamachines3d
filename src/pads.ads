@@ -41,6 +41,13 @@ package Pads is
 
    procedure Release_All;   --  nobody has a controller: the next press decides
 
+   --  Choosing a player's controller in the options: the K-th one plugged in, any one
+   --  (the first pressed, 0), or none (-1)
+   function Device_Count return Natural;
+   function Device_Name (K : Positive) return String;
+   procedure Choose (P : Player_Number; K : Integer);
+   function Chosen (P : Player_Number) return Integer;
+
    --  Feeling the race through the controller: a pad rumbles, a wheel pulls back to
    --  the middle harder the faster the car goes, and shakes when it is knocked
    procedure Feel (P : Player_Number; Kick, Rough, Speed_Share : Float);

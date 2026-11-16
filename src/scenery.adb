@@ -7,10 +7,14 @@ with Art;
 with Geom;
 with Lin; use Lin;
 with Tracks; use Tracks;
+with Terrain;
+with Air;
 
 package body Scenery is
 
    use Mesh;
+   use type Air.Time_Kind;
+   use type Air.Weather_Kind;
 
    Pi : constant := Geom.Pi;
    Table_Drop : constant := 260.0;   --  from a table top to the floor
@@ -549,6 +553,108 @@ package body Scenery is
 
    ---------------------------------------------------------------------------
 
+   --  The top of the sky, by the time of day and the weather
+   function Sky_Top (Default : Color) return Color is
+     (if Air.Time = Air.Night then (0.0, 0.0, 0.03, 1.0)
+      elsif Air.Weather = Air.Rain then (0.40, 0.43, 0.48, 1.0)
+      elsif Air.Weather = Air.Snow then (0.68, 0.71, 0.77, 1.0)
+      elsif Air.Time = Air.Sunset then (0.30, 0.24, 0.52, 1.0)
+      else Default);
+
+   --  The track's picture laid over the hills: a grid, its corners lifted to the land
+   procedure Hilly_Ground (B : in out Buffer; Ground_Y : Float) is
+      Cell : constant := 24.0;
+      NX : constant Positive := Positive (Float'Ceiling (W / Cell));
+      NZ : constant Positive := Positive (Float'Ceiling (H / Cell));
+      type Grid is array (0 .. NX, 0 .. NZ) of Float;
+      type Grid_Access is access Grid;
+      Ht : constant Grid_Access := new Grid;
+      function X_Of (I : Natural) return Float is (Float'Min (W, Float (I) * Cell));
+      function Z_Of (J : Natural) return Float is (Float'Min (H, Float (J) * Cell));
+      function P (I, J : Natural) return V3 is ((X_Of (I), Ground_Y + Ht (I, J), Z_Of (J)));
+      function N (I, J : Natural) return V3 is
+        (Normal ((Ht (Natural'Max (0, I - 1), J) - Ht (Natural'Min (NX, I + 1), J), 2.0 * Cell,
+                  Ht (I, Natural'Max (0, J - 1)) - Ht (I, Natural'Min (NZ, J + 1)))));
+      Hint : Integer := -1;
+   begin
+      for J in 0 .. NZ loop
+         for I in 0 .. NX loop
+            Ht (I, J) := Terrain.Height ((X_Of (I), Z_Of (J)), Hint);
+            Hint := Tracks.Nearest ((X_Of (I), Z_Of (J)), Hint);
+         end loop;
+      end loop;
+      for J in 0 .. NZ - 1 loop
+         for I in 0 .. NX - 1 loop
+            Vertex (B, P (I, J), N (I, J), White, 1.0);
+            Vertex (B, P (I + 1, J), N (I + 1, J), White, 1.0);
+            Vertex (B, P (I + 1, J + 1), N (I + 1, J + 1), White, 1.0);
+            Vertex (B, P (I, J), N (I, J), White, 1.0);
+            Vertex (B, P (I + 1, J + 1), N (I + 1, J + 1), White, 1.0);
+            Vertex (B, P (I, J + 1), N (I, J + 1), White, 1.0);
+         end loop;
+      end loop;
+   end Hilly_Ground;
+
+   --  A tunnel: a round roof over the road, its mouths, a mound of earth over it
+   procedure Tunnels (B : in out Buffer; Ground_Y : Float) is
+      Earth : constant Color :=
+        (case Theme is
+            when Arctic => (0.93, 0.95, 1.0, 1.0),
+            when Moon => (0.55, 0.55, 0.57, 1.0),
+            when Alien => (0.45, 0.25, 0.50, 1.0),
+            when Mud => (0.45, 0.36, 0.22, 1.0),
+            when others => (0.30, 0.55, 0.22, 1.0));
+      Stone : constant Color := (0.55, 0.52, 0.48, 1.0);
+      Inside : constant Color := (0.35, 0.32, 0.30, 1.0);
+      Segs : constant := 12;
+      Roof : constant := 58.0;
+   begin
+      for T in 1 .. Terrain.Tunnel_Count loop
+         declare
+            Tn : Terrain.Tunnel renames Terrain.Tunnels (T);
+            function Ring (I : Natural; K : Natural; Out_By : Float := 0.0) return V3 is
+               S : constant Sample := Get (I);
+               A : constant Float := Pi * Float (K) / Float (Segs);
+               Across : constant Geom.Vec := Geom.Perp (S.T);
+               R : constant Float := S.Width / 2.0 + 14.0 + Out_By;
+               Base : constant Float := Ground_Y + Terrain.Height (S.P, I);
+            begin
+               return (S.P.X + Across.X * R * Cos (A), Base + (Roof + Out_By) * Sin (A), S.P.Y + Across.Y * R * Cos (A));
+            end Ring;
+            I : Natural := Tn.First;
+         begin
+            while I < Tn.Last loop
+               declare
+                  Nx : constant Natural := Natural'Min (Tn.Last, I + 2);
+               begin
+                  for K in 0 .. Segs - 1 loop
+                     Quad (B, Ring (I, K), Ring (Nx, K), Ring (Nx, K + 1), Ring (I, K + 1), Inside);
+                  end loop;
+                  I := Nx;
+               end;
+            end loop;
+            --  the mouths: a band of stone round each end
+            for Ends in 0 .. 1 loop
+               declare
+                  E : constant Natural := (if Ends = 0 then Tn.First else Tn.Last);
+               begin
+                  for K in 0 .. Segs - 1 loop
+                     Quad (B, Ring (E, K), Ring (E, K, 10.0), Ring (E, K + 1, 10.0), Ring (E, K + 1), Stone);
+                  end loop;
+               end;
+            end loop;
+            --  the mound over it
+            declare
+               Mid : constant Sample := Get ((Tn.First + Tn.Last) / 2);
+               Long : constant Float := Float (Tn.Last - Tn.First) * Tracks.Spacing / 2.0 - 12.0;
+            begin
+               Dome (B, (Mid.P.X, Ground_Y + Terrain.Height (Mid.P, (Tn.First + Tn.Last) / 2) - 4.0, Mid.P.Y),
+                     Long, Mid.Width / 2.0 + 150.0, Geom.Angle_Of (Mid.T), 96.0, Earth, 0.0, 24);
+            end;
+         end;
+      end loop;
+   end Tunnels;
+
    procedure Build (B, Clear : in out Buffer; Ground_Y : Float; Horizon : Color) is
       Far : constant := 30000.0;
       GC : constant Art.RGB := Art.Ground_Color;
@@ -596,9 +702,12 @@ package body Scenery is
                end;
             end loop;
          end;
+      elsif Terrain.Active then
+         Hilly_Ground (B, Ground_Y);
       else
          Ground (0.0, 0.0, W, H, Ground_Y, 1.0, White);
       end if;
+      Tunnels (B, Ground_Y);
 
       case Place is
          when Tabletop =>
@@ -744,7 +853,15 @@ package body Scenery is
                else
                   Room (B, R, Wall, (if Theme in Pool | Chess | Xmas then Dark_Wood else White),
                         (if Theme = Garage then (0.55, 0.55, 0.57, 1.0) else (0.95, 0.95, 0.93, 1.0)));
-                  North_Window (B, R, W * 0.3, 260.0, (0.40, 0.62, 0.92, 1.0), (0.78, 0.88, 0.98, 1.0),
+                  North_Window (B, R, W * 0.3, 260.0,
+                                (case Air.Time is
+                                    when Air.Day => (0.40, 0.62, 0.92, 1.0),
+                                    when Air.Sunset => (0.35, 0.30, 0.60, 1.0),
+                                    when Air.Night => (0.02, 0.02, 0.07, 1.0)),
+                                (case Air.Time is
+                                    when Air.Day => (0.78, 0.88, 0.98, 1.0),
+                                    when Air.Sunset => (1.0, 0.62, 0.38, 1.0),
+                                    when Air.Night => (0.06, 0.08, 0.16, 1.0)),
                                 (if Theme in Garage | Pool then (0.3, 0.3, 0.3, 1.0) else White));
                   West_Door (B, R, H / 2.0, (if Theme = Bath then White else Wood));
                   if Theme = Bath then
@@ -769,8 +886,18 @@ package body Scenery is
                      when others => (0.28, 0.50, 0.88, 1.0));
                Base : constant Float := Ground_Y;
             begin
-               Sky_Dome (B, Top, Horizon, Base);
-               Clouds (B, 14, Base + 1500.0, Base + 4500.0);
+               Sky_Dome (B, Sky_Top (Top), Horizon, Base);
+               if Air.Time = Air.Night then
+                  Stars (B, (if Air.Weather = Air.Clear then 300 else 40), Base);
+                  Sky_Disc (B, (Middle.X - 4000.0, Base + 3800.0, Middle.Z - 6500.0), 500.0, (0.95, 0.95, 0.88, 1.0),
+                            (0.85, 0.85, 0.80, 1.0));
+               elsif Air.Time = Air.Sunset and then Air.Weather = Air.Clear then
+                  --  the sun going down, where the light comes from
+                  Sky_Disc (B, (Middle.X + 7200.0, Base + 1500.0, Middle.Z + 3800.0), 600.0, (1.0, 0.85, 0.55, 1.0),
+                            (1.0, 0.55, 0.30, 1.0));
+               end if;
+               Clouds (B, (if Air.Weather = Air.Clear then 14 else 34), Base + 1200.0, Base + 3500.0,
+                       Night => Air.Time = Air.Night or else Air.Weather = Air.Rain);
                case Theme is
                   when Garden | Easter =>
                      Hills (B, 14, 2500.0, 6000.0, 1800.0, Base, (0.32, 0.55, 0.22, 1.0));

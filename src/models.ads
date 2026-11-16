@@ -27,10 +27,15 @@ package Models is
    procedure Item (B : in out Mesh.Buffer; It : Tracks.Item; Ground_Y, Fly_Height : Float);
    --  The thing standing on the floor at Ground_Y (or floating at Fly_Height, among planes)
 
+   Styles : constant := 4;
+   subtype Car_Style is Natural range 0 .. Styles - 1;   --  racer, beetle, van, sports car
+   function Style_Name (S : Car_Style) return String is
+     (case S is when 0 => "RACER", when 1 => "BEETLE", when 2 => "VAN", when others => "SPORTS CAR");
+
    procedure Vehicle (B, Glow : in out Mesh.Buffer; O : V3; H : Float; Paint : Mesh.Color;
-                      Alpha : Float := 1.0);
+                      Alpha : Float := 1.0; Style : Car_Style := 0; Number : Natural := 0);
    --  The vehicle of the track loaded, at O, pointing along H; Glow takes its see-through parts.
-   --  Alpha below 1: a ghost
+   --  Alpha below 1: a ghost.  Style: the body of a car; Number: on its roof (0: none)
 
    procedure Cockpit (B : in out Mesh.Buffer; O : V3; H : Float; Paint : Mesh.Color);
    --  What the driver sees of their own vehicle: the bonnet, the dashboard, the wheel

@@ -326,11 +326,13 @@ package body Pads is
    function Owned (P : Natural) return Boolean is
      (for some D of Devices => D.Open and then D.Owner = P);
 
+   Picks : array (Player_Number) of Integer := (others => 0);
+
    procedure Claim (D : in out Device) is
    begin
       if D.Owner = 0 then
          for P in Player_Number loop
-            if not Owned (P) then
+            if not Owned (P) and then Picks (P) = 0 then
                D.Owner := P;
                if Debug then
                   Ada.Text_IO.Put_Line (Ada.Text_IO.Standard_Error, "pad: " & D.Name (1 .. D.Name_Len) & " is player" & P'Image);
@@ -591,6 +593,45 @@ package body Pads is
          end if;
       end loop;
    end Shut_Down;
+
+   function Device_Count return Natural renames Count;
+
+   --  The index in Devices of the K-th one open
+   function Nth (K : Positive) return Integer is
+      N : Natural := 0;
+   begin
+      for I in Devices'Range loop
+         if Devices (I).Open then
+            N := N + 1;
+            if N = K then
+               return I;
+            end if;
+         end if;
+      end loop;
+      return -1;
+   end Nth;
+
+   function Device_Name (K : Positive) return String is
+      I : constant Integer := Nth (K);
+   begin
+      return (if I < 0 then "" else Devices (I).Name (1 .. Devices (I).Name_Len));
+   end Device_Name;
+
+   procedure Choose (P : Player_Number; K : Integer) is
+      I : constant Integer := (if K > 0 then Nth (K) else -1);
+   begin
+      Picks (P) := K;
+      for D of Devices loop
+         if D.Owner = P then
+            D.Owner := 0;
+         end if;
+      end loop;
+      if I >= 0 then
+         Devices (I).Owner := P;
+      end if;
+   end Choose;
+
+   function Chosen (P : Player_Number) return Integer is (Picks (P));
 
    procedure Release_All is
    begin

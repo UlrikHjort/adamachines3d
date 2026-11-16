@@ -14,7 +14,8 @@ with Race;
 
 package View is
 
-   type Camera_Kind is (Chase, Bumper, Cockpit, High);
+   type Camera_Kind is (Chase, Bumper, Cockpit, High, TV);
+   subtype Player_Camera is Camera_Kind range Chase .. High;   --  TV: beside the track, for replays
    subtype Slot is Positive range 1 .. 2;   --  a player's view
 
    procedure Init;
@@ -55,5 +56,10 @@ package View is
    function Ear_Right return Geom.Vec;    --  its right, on the floor, for the pan of sounds
 
    function Fps return Float;
+
+   Shadows_On : Boolean := True;
+
+   --  The body of each car (on the car tracks), as chosen or given
+   Styles : array (Race.Car_Index) of Natural := (0, 1, 2, 3, 0, 1, 2, 3);   --  the sun's shadows; off for a slow machine
 
 end View;

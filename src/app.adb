@@ -2,6 +2,7 @@
 --  Copyright (c) 2026 Ulrik Hørlyk Hjort
 --  SPDX-License-Identifier: MIT
 
+with Ada.Containers.Vectors;
 with Ada.Environment_Variables;
 with Ada.Numerics.Elementary_Functions; use Ada.Numerics.Elementary_Functions;
 with Ada.Exceptions;
@@ -29,9 +30,13 @@ with Geom; use Geom;
 with GL;
 with Overlay;
 with Net;
+with Models;
+with Palette;
 with Pads;
 with Race;
+with Air;
 with Records;
+with Speech;
 with Tracks;
 with View;
 
@@ -44,6 +49,7 @@ package body App is
    use type Race.Difficulty;
    use type Race.Game_Mode;
    use type Editor.Action;
+   use type Pads.Action;
    use type Net.Role_Kind;
    use type Net.Join_State;
 
@@ -82,6 +88,12 @@ package body App is
    Items_On  : Boolean := True;
    Cameras   : array (View.Slot) of View.Camera_Kind := (others => View.Chase);
    Muted     : Boolean := False;
+   Car_Choice : array (1 .. 2) of Natural := (0, 0);     --  each player's car body
+   Paint_Choice : array (1 .. 2) of Natural := (0, 1);   --  and colour
+   Sound_Volume : Natural range 0 .. 10 := 8;
+   Music_Volume : Natural range 0 .. 10 := 5;
+   type Voice_Choice is (Voice_Off, Voice_Woman, Voice_Man);
+   Voice : Voice_Choice := Voice_Woman;
 
    --  The ways to play
    type Play_Kind is (Single_Race, Championship, Time_Trial, Duel_Play, Net_Play);
@@ -183,6 +195,16 @@ package body App is
       Put_Line (F, "camera1=" & View.Camera_Kind'Image (Cameras (1)));
       Put_Line (F, "camera2=" & View.Camera_Kind'Image (Cameras (2)));
       Put_Line (F, "name=" & Trim_Name (Player_Name));
+      Put_Line (F, "sound=" & Img (Sound_Volume));
+      Put_Line (F, "time=" & Air.Time_Kind'Image (Air.Time));
+      Put_Line (F, "weather=" & Air.Weather_Kind'Image (Air.Weather));
+      Put_Line (F, "car1=" & Img (Car_Choice (1)));
+      Put_Line (F, "car2=" & Img (Car_Choice (2)));
+      Put_Line (F, "paint1=" & Img (Paint_Choice (1)));
+      Put_Line (F, "paint2=" & Img (Paint_Choice (2)));
+      Put_Line (F, "music=" & Img (Music_Volume));
+      Put_Line (F, "voice=" & Voice_Choice'Image (Voice));
+      Put_Line (F, "shadows=" & (if View.Shadows_On then "1" else "0"));
       Put_Line (F, "address=" & To_String (Join_Address));
       Close (F);
    exception
@@ -215,6 +237,16 @@ package body App is
                   elsif K = "camera1" then Cameras (1) := View.Camera_Kind'Value (V);
                   elsif K = "camera2" then Cameras (2) := View.Camera_Kind'Value (V);
                   elsif K = "name" and then V'Length > 0 then Player_Name := As_Name (V);
+                  elsif K = "sound" then Sound_Volume := Natural'Value (V);
+                  elsif K = "time" then Air.Time := Air.Time_Kind'Value (V);
+                  elsif K = "weather" then Air.Weather := Air.Weather_Kind'Value (V);
+                  elsif K = "car1" then Car_Choice (1) := Natural'Value (V) mod Models.Styles;
+                  elsif K = "car2" then Car_Choice (2) := Natural'Value (V) mod Models.Styles;
+                  elsif K = "paint1" then Paint_Choice (1) := Natural'Value (V) mod 8;
+                  elsif K = "paint2" then Paint_Choice (2) := Natural'Value (V) mod 8;
+                  elsif K = "music" then Music_Volume := Natural'Value (V);
+                  elsif K = "voice" then Voice := Voice_Choice'Value (V);
+                  elsif K = "shadows" then View.Shadows_On := V = "1";
                   elsif K = "address" then Join_Address := To_Unbounded_String (V);
                   end if;
                exception
@@ -235,7 +267,7 @@ package body App is
    ---------------------------------------------------------------------------
 
    type Mode_Kind is (Title, Racing, Paused, Results, Standings, Net_Menu, Host_Lobby, Browse, Client_Lobby,
-                      Editing_Track);
+                      Editing_Track, Options, Replay);
    Mode   : Mode_Kind := Title;
    Choice : Positive := 1;      --  the line chosen in the menu
    Ready  : Boolean := False;   --  the GL context is made, the world built
@@ -248,10 +280,28 @@ package body App is
    From_Editor : Boolean := False;   --  a test drive: back to the editor after it
    Shift_Held : Boolean := False;
 
+   Shot_Off : Boolean := True;   --  no screenshot being taken: the announcer may speak
+
    --  A few words across the screen for a moment: a lap, a record
    Message : String (1 .. 40) := (others => ' ');
    Message_Len : Natural := 0;
    Message_T : Float := 0.0;
+
+   procedure Announce (Text : String) is
+   begin
+      if Voice /= Voice_Off and then not Muted and then Sound_Volume > 0 and then not Race.State.Attract
+        and then Shot_Off
+      then
+         Speech.Voice := (if Voice = Voice_Man then Speech.Man else Speech.Woman);
+         Speech.Loudness := 30 + 17 * Sound_Volume;
+         Speech.Say (Text);
+      end if;
+   end Announce;
+
+   function Spoken_Place (N : Positive) return String is
+     (case N is
+         when 1 => "first", when 2 => "second", when 3 => "third",
+         when 4 => "fourth", when 5 => "fifth", when 6 => "sixth", when 7 => "seventh", when others => "eighth");
 
    procedure Say (Text : String; Seconds : Float := 1.8) is
    begin
@@ -357,19 +407,70 @@ package body App is
       View.New_Race;
    end Start_Attract;
 
+   --  Each player's car as they chose it: its body, and its colour (swapped with whoever had it)
+   procedure Dress_Cars is
+      St : Race.State_Type renames Race.State;
+   begin
+      for I in Race.Car_Index loop
+         View.Styles (I) := (I - 1) mod Models.Styles;
+      end loop;
+      for P in 1 .. Players loop
+         declare
+            Me : constant Race.Car_Index := Race.Player (P);
+            Want : constant Natural := Paint_Choice (P);
+         begin
+            View.Styles (Me) := Car_Choice (P);
+            if P = 1 or else Want /= Paint_Choice (1) then
+               for J in 1 .. St.Count loop
+                  if J /= Me and then St.Racers (J).Paint = Want then
+                     St.Racers (J).Paint := St.Racers (Me).Paint;
+                  end if;
+               end loop;
+               St.Racers (Me).Paint := Want;
+            end if;
+         end;
+      end loop;
+   end Dress_Cars;
+
+   --  The race as it was run, to be run again for the replay: how it was set up,
+   --  and what was pressed at every step of it
+   package Input_Lists is new Ada.Containers.Vectors (Natural, Race.Input, Race."=");
+   Recording : Input_Lists.Vector;
+   type Setup_Record is record
+      Id : Tracks.Track_Id := 1;
+      Mode : Race.Game_Mode := Race.Single;
+      Opponents : Natural := 0;
+      Laps : Positive := 3;
+      Level : Race.Difficulty := Race.Normal;
+      Items : Boolean := True;
+      View_W, View_H : Float := 1000.0;
+      Split : Boolean := False;
+   end record;
+   Rec : Setup_Record;
+   Can_Replay : Boolean := False;   --  a race was run here that can be watched again
+   Replay_Pos : Natural := 0;
+   Replay_Car : Race.Car_Index := 1;
+   Replay_Cam : View.Camera_Kind := View.TV;
+   Replay_End_T : Float := 0.0;
+
    function Race_Track return Tracks.Track_Id is
      (if Play = Championship then Cup_Tracks (Cup) (Round) else Track);
 
    procedure Start_Race is
    begin
       Race.Split_Screen := Players = 2 and then Play /= Duel_Play;
-      Race.Setup (Race_Track,
-                  (case Play is
-                      when Time_Trial => Race.Trial,
-                      when Duel_Play => Race.Duel,
-                      when others => (if Players = 2 then Race.Double else Race.Single)),
-                  (if Play in Time_Trial | Duel_Play then 0 else Natural'Min (Opponents, Max_Opponents)),
-                  Laps, Level, Items => Items_On and then Play /= Time_Trial);
+      Rec := (Id => Race_Track,
+              Mode => (case Play is
+                          when Time_Trial => Race.Trial,
+                          when Duel_Play => Race.Duel,
+                          when others => (if Players = 2 then Race.Double else Race.Single)),
+              Opponents => (if Play in Time_Trial | Duel_Play then 0 else Natural'Min (Opponents, Max_Opponents)),
+              Laps => Laps, Level => Level, Items => Items_On and then Play /= Time_Trial,
+              View_W => Race.State.View_W, View_H => Race.State.View_H, Split => Race.Split_Screen);
+      Race.Setup (Rec.Id, Rec.Mode, Rec.Opponents, Rec.Laps, Rec.Level, Items => Rec.Items);
+      Recording.Clear;
+      Can_Replay := True;
+      Dress_Cars;
       Scored := False;
       Seen_Lap := 0;
       Was_Running := False;
@@ -388,12 +489,15 @@ package body App is
       end if;
       Mode := Racing;
       Fire_Pending := (others => False);
+      Announce ((if Play = Championship and then Round = 1 then Cup_Name (Cup) & ". " else "")
+                & (if Play = Duel_Play then "Duel on " else "") & Tracks.Name (Race_Track) & ". Get ready!");
    end Start_Race;
 
    --  A network race: everyone sets it up the same, from the lobby
    procedure Start_Net_Race is
       L : Net.Lobby_Info renames Net.Lobby;
    begin
+      Can_Replay := False;   --  the host runs it: nothing to watch again here
       Race.Split_Screen := False;
       Race.Local := (if Hosting then 1 else Natural'Max (1, Net.Me));
       Race.Setup_Net (L.Track, Natural'Max (1, L.Players), L.Names, L.AIs, L.Laps, L.Level, L.Items);
@@ -413,6 +517,7 @@ package body App is
       end if;
       Mode := Racing;
       Fire_Pending := (others => False);
+      Announce (Tracks.Name (L.Track) & ". Get ready!");
    end Start_Net_Race;
 
    --  The race behind the lobby: on the track chosen there
@@ -454,6 +559,37 @@ package body App is
          Start_Attract;
       end if;
    end Leave_Net;
+
+   --  The race once more, as it was: the same start, the same keys at every step
+   procedure Start_Replay is
+   begin
+      Race.Split_Screen := Rec.Split;
+      Race.State.View_W := Rec.View_W;
+      Race.State.View_H := Rec.View_H;
+      Race.Setup (Rec.Id, Rec.Mode, Rec.Opponents, Rec.Laps, Rec.Level, Items => Rec.Items);
+      Dress_Cars;
+      View.Ghost_On := False;
+      Events_Read := Race.Event_Serial;
+      Accum := 0.0;
+      Replay_Pos := 0;
+      Replay_End_T := 0.0;
+      Replay_Car := Race.Player (1);
+      Replay_Cam := View.TV;
+      View.New_Race;
+      Mode := Replay;
+   end Start_Replay;
+
+   --  Out of the replay: the rest of it run at once, so the race ends as it did
+   procedure End_Replay is
+   begin
+      while Replay_Pos < Natural (Recording.Length) loop
+         Race.Step (Recording (Replay_Pos), Autopilot => Autopilot);
+         Replay_Pos := Replay_Pos + 1;
+      end loop;
+      Events_Read := Race.Event_Serial;
+      Mode := Results;
+      Choice := 1;
+   end End_Replay;
 
    procedure Start_Game is
    begin
@@ -498,7 +634,10 @@ package body App is
    ---------------------------------------------------------------------------
 
    type Title_Line is (Go, Line_Play, Line_Players, Line_Track, Line_Laps, Line_Opponents, Line_Level, Line_Items,
-                       Line_Camera_1, Line_Camera_2, Line_Editor, Line_Quit);
+                       Line_Time, Line_Weather, Line_Camera_1, Line_Camera_2, Line_Options, Line_Editor, Line_Quit);
+   type Option_Line is (Opt_Car_1, Opt_Paint_1, Opt_Car_2, Opt_Paint_2, Opt_Sound, Opt_Music, Opt_Voice, Opt_Shadows,
+                        Opt_Pad_1, Opt_Pad_2, Opt_Back);
+   Return_To : Mode_Kind := Title;   --  where the options go back to
 
 
    --  The tracks in turn: the built-in ones, then those made in the editor and kept
@@ -516,13 +655,14 @@ package body App is
       end loop;
       return N;
    end Next_Track;
-   type Pause_Line is (Go_On, Again, Leave);
+   type Pause_Line is (Go_On, Again, Pause_Options, Leave);
 
    function Lines return Positive is
      (case Mode is
          when Title => Title_Line'Pos (Title_Line'Last) + 1,
          when Paused => (if In_Net_Race then 2 else Pause_Line'Pos (Pause_Line'Last) + 1),
          when Net_Menu => 4,
+         when Options => Option_Line'Pos (Option_Line'Last) + 1,
          when Host_Lobby => 7,
          when Browse => Net.N_Found + 2,
          when others => 1);
@@ -532,8 +672,43 @@ package body App is
 
    function Title_At return Title_Line is (Title_Line'Val (Choice - 1));
 
+   function Pad_Name (P : Pads.Player_Number) return String is
+     (case Pads.Chosen (P) is
+         when -1 => "NONE",
+         when 0 => "ANY: THE FIRST PRESSED",
+         when others => Pads.Device_Name (Pads.Chosen (P)));
+
    procedure Change (Dir : Integer) is
    begin
+      if Mode = Options then
+         case Option_Line'Val (Choice - 1) is
+            when Opt_Sound =>
+               Sound_Volume := Natural'Max (0, Natural'Min (10, Sound_Volume + Dir));
+               Audio.Play (Audio.Beep_Low, 0.8);
+            when Opt_Music => Music_Volume := Natural'Max (0, Natural'Min (10, Music_Volume + Dir));
+            when Opt_Voice =>
+               Voice := Voice_Choice'Val ((Voice_Choice'Pos (Voice) + (if Dir > 0 then 1 else 2)) mod 3);
+               if Voice /= Voice_Off then
+                  Speech.Voice := (if Voice = Voice_Man then Speech.Man else Speech.Woman);
+                  Speech.Loudness := 30 + 17 * Sound_Volume;
+                  Speech.Say ("Ready to race!");
+               end if;
+            when Opt_Shadows => View.Shadows_On := not View.Shadows_On;
+            when Opt_Pad_1 | Opt_Pad_2 =>
+               declare
+                  P : constant Pads.Player_Number := (if Option_Line'Val (Choice - 1) = Opt_Pad_1 then 1 else 2);
+               begin
+                  Pads.Choose (P, Turn (Pads.Chosen (P), Dir, -1, Pads.Device_Count));
+               end;
+            when Opt_Car_1 => Car_Choice (1) := Turn (Car_Choice (1), Dir, 0, Models.Styles - 1);
+            when Opt_Car_2 => Car_Choice (2) := Turn (Car_Choice (2), Dir, 0, Models.Styles - 1);
+            when Opt_Paint_1 => Paint_Choice (1) := Turn (Paint_Choice (1), Dir, 0, 7);
+            when Opt_Paint_2 => Paint_Choice (2) := Turn (Paint_Choice (2), Dir, 0, 7);
+            when Opt_Back => null;
+         end case;
+         Save_Choices;
+         return;
+      end if;
       if Mode = Host_Lobby then
          declare
             L : Net.Lobby_Info renames Net.Lobby;
@@ -587,16 +762,21 @@ package body App is
                             else Race.Difficulty'Pred (Level)));
          when Line_Items =>
             Items_On := not Items_On;
+         when Line_Time =>
+            Air.Time := Air.Time_Kind'Val (Turn (Air.Time_Kind'Pos (Air.Time), Dir, 0, 2));
+            Change_T := 0.45;
+         when Line_Weather =>
+            Air.Weather := Air.Weather_Kind'Val (Turn (Air.Weather_Kind'Pos (Air.Weather), Dir, 0, 2));
+            Change_T := 0.45;
          when Line_Camera_1 | Line_Camera_2 =>
             declare
                S : constant View.Slot := (if Title_At = Line_Camera_1 then 1 else 2);
             begin
-               Cameras (S) := (if Dir > 0 then (if Cameras (S) = View.Camera_Kind'Last then View.Camera_Kind'First
-                                                else View.Camera_Kind'Succ (Cameras (S)))
-                               else (if Cameras (S) = View.Camera_Kind'First then View.Camera_Kind'Last
-                                     else View.Camera_Kind'Pred (Cameras (S))));
+               Cameras (S) := View.Camera_Kind'Val
+                 (Turn (View.Camera_Kind'Pos (Cameras (S)), Dir, View.Camera_Kind'Pos (View.Player_Camera'First),
+                        View.Camera_Kind'Pos (View.Player_Camera'Last)));
             end;
-         when Go | Line_Quit | Line_Editor =>
+         when Go | Line_Quit | Line_Editor | Line_Options =>
             null;
       end case;
       Audio.Play (Audio.Beep_Low, 0.5);
@@ -619,6 +799,10 @@ package body App is
                when Line_Quit =>
                   Save_Choices;
                   Gtk.Main.Main_Quit;
+               when Line_Options =>
+                  Return_To := Title;
+                  Mode := Options;
+                  Choice := 1;
                when Line_Editor =>
                   Editor.Open ((if Tracks.Is_Custom (Track) then Tracks.Slot_Of (Track) else Editor.Current));
                   Mode := Editing_Track;
@@ -637,6 +821,10 @@ package body App is
             case Pause_Line'Val (Choice - 1) is
                when Go_On => Mode := Racing;
                when Again => Start_Race;
+               when Pause_Options =>
+                  Return_To := Paused;
+                  Mode := Options;
+                  Choice := 1;
                when Leave => To_Title;
             end case;
          when Results =>
@@ -650,6 +838,20 @@ package body App is
             elsif Play = Championship then
                Score_Round;
                Mode := Standings;
+               if Round = Cup_Tracks (Cup)'Last then
+                  declare
+                     Me : constant Race.Car_Index := Race.Player (1);
+                     Ahead : Natural := 0;
+                  begin
+                     for K in 1 .. Race.State.Count loop
+                        if Points (K) > Points (Me) then
+                           Ahead := Ahead + 1;
+                        end if;
+                     end loop;
+                     Announce ((if Ahead = 0 then "You are the champion!"
+                                else "You finished " & Spoken_Place (Ahead + 1) & " in the " & Cup_Name (Cup) & "."));
+                  end;
+               end if;
             else
                To_Title;
             end if;
@@ -703,6 +905,15 @@ package body App is
             Leave_Net;
          when Editing_Track =>
             null;
+         when Replay =>
+            End_Replay;
+         when Options =>
+            if Option_Line'Val (Choice - 1) = Opt_Back then
+               Mode := Return_To;
+               Choice := (if Return_To = Title then Title_Line'Pos (Line_Options) + 1 else 3);
+            else
+               Change (1);
+            end if;
       end case;
    end Choose;
 
@@ -729,6 +940,10 @@ package body App is
          when Net_Menu => Mode := Title; Choice := 1;
          when Host_Lobby | Browse | Client_Lobby => Leave_Net;
          when Editing_Track => null;
+         when Replay => End_Replay;
+         when Options =>
+            Mode := Return_To;
+            Choice := 1;
       end case;
    end Back;
 
@@ -744,7 +959,7 @@ package body App is
 
    procedure Next_Camera (S : View.Slot) is
    begin
-      Cameras (S) := (if Cameras (S) = View.Camera_Kind'Last then View.Camera_Kind'First
+      Cameras (S) := (if Cameras (S) >= View.Player_Camera'Last then View.Player_Camera'First
                       else View.Camera_Kind'Succ (Cameras (S)));
    end Next_Camera;
 
@@ -753,7 +968,7 @@ package body App is
       S : constant View.Slot := (if P = 2 and then Players = 2 then 2 else 1);
    begin
       case Mode is
-         when Title | Paused | Results | Standings | Net_Menu | Host_Lobby | Browse | Client_Lobby =>
+         when Title | Paused | Results | Standings | Net_Menu | Host_Lobby | Browse | Client_Lobby | Options =>
             case A is
                when Pads.Up => Menu_Move (-1);
                when Pads.Down => Menu_Move (1);
@@ -771,10 +986,26 @@ package body App is
                   if Mode in Paused | Results and then Play not in Championship | Net_Play then
                      Start_Race;
                   end if;
-               when Pads.Fire | Pads.Camera => null;
+               when Pads.Camera =>
+                  if Mode = Results and then Can_Replay then
+                     Start_Replay;
+                  end if;
+               when Pads.Fire => null;
             end case;
          when Editing_Track =>
             null;
+         when Replay =>
+            case A is
+               when Pads.Ok | Pads.Back | Pads.Pause => End_Replay;
+               when Pads.Left | Pads.Right =>
+                  Replay_Car := (if A = Pads.Right then (if Replay_Car >= Race.State.Count then 1 else Replay_Car + 1)
+                                 else (if Replay_Car = 1 then Race.State.Count else Replay_Car - 1));
+                  View.New_Race;
+               when Pads.Camera =>
+                  Replay_Cam := (if Replay_Cam = View.Camera_Kind'Last then View.Camera_Kind'First
+                                 else View.Camera_Kind'Succ (Replay_Cam));
+               when others => null;
+            end case;
          when Racing =>
             case A is
                when Pads.Fire => Fire_Pending (S) := True;
@@ -900,6 +1131,17 @@ package body App is
          Show_Fps := not Show_Fps;
       elsif K = GDK_LC_m or else K = GDK_M then
          Muted := not Muted;
+      elsif Mode = Replay then
+         if K = GDK_Escape or else K = GDK_Return or else K = GDK_KP_Enter then
+            End_Replay;
+         elsif K = GDK_Right or else K = GDK_Left then
+            Replay_Car := (if K = GDK_Right then (if Replay_Car >= Race.State.Count then 1 else Replay_Car + 1)
+                           else (if Replay_Car = 1 then Race.State.Count else Replay_Car - 1));
+            View.New_Race;
+         elsif K = GDK_LC_c or else K = GDK_C then
+            Replay_Cam := (if Replay_Cam = View.Camera_Kind'Last then View.Camera_Kind'First
+                           else View.Camera_Kind'Succ (Replay_Cam));
+         end if;
       elsif Mode = Racing then
          if K = GDK_Escape or else K = GDK_LC_p or else K = GDK_P then
             Pause;
@@ -913,7 +1155,9 @@ package body App is
             Fire_Pending ((if Players = 2 and then Fire_2 then 2 else 1)) := True;
          end if;
       else
-         if K = GDK_Up or else K = GDK_LC_w or else K = GDK_W then
+         if Mode = Results and then Can_Replay and then (K = GDK_LC_w or else K = GDK_W) then
+            Start_Replay;
+         elsif K = GDK_Up or else K = GDK_LC_w or else K = GDK_W then
             Menu_Move (-1);
          elsif K = GDK_Down or else K = GDK_LC_s or else K = GDK_S then
             Menu_Move (1);
@@ -1004,7 +1248,7 @@ package body App is
          declare
             E : constant Race.Event := Events (K mod Event_Ring);
             Mine : constant Boolean :=
-              Racing_Now and then E.Car in 1 .. State.Count
+              Racing_Now and then Mode /= Replay and then E.Car in 1 .. State.Count
               and then (if State.Mode = Race.Net then State.Racers (E.Car).Human = Local
                         else State.Racers (E.Car).Human > 0);
             Lv : constant Float := (if Mine then 1.0 else Near_Level (E.P)) * (if Racing_Now then 1.0 else 0.5);
@@ -1035,16 +1279,30 @@ package body App is
                when Beep => if Racing_Now then Audio.Play (Audio.Beep_Low, 0.8); end if;
                when Go => if Racing_Now then Audio.Play (Audio.Beep_High, 0.9); end if;
                when Lap_Done | Final_Lap | Race.Finished =>
-                  if Mine then
+                  if Mine and then Mode /= Replay then
                      if Records.Offer_Lap (Tracks.Current, State.Racers (E.Car).Last_Lap) then
                         Say ("NEW LAP RECORD!", 2.5);
                         Audio.Play (Audio.Chime, 0.9);
+                        Announce ("New lap record!");
                      elsif E.Kind = Final_Lap then
                         Say ("FINAL LAP");
+                        Announce ("Final lap!");
                      elsif E.Kind = Lap_Done and then Play /= Time_Trial then
                         Say ("LAP " & Img (Lap_Shown (E.Car)), 1.2);
                      end if;
                      Audio.Play ((if E.Kind = Race.Finished then Audio.Fanfare else Audio.Lap), 0.8);
+                     if E.Kind = Race.Finished and then Play /= Time_Trial then
+                        declare
+                           P : constant Positive := State.Racers (E.Car).Place;
+                           Who : constant String :=
+                             (if Players = 2 then "Player " & (if State.Racers (E.Car).Human = 1 then "one" else "two")
+                              else "");
+                        begin
+                           Announce ((if P = 1 then (if Who = "" then "You win!" else Who & " wins!")
+                                      else (if Who = "" then "You finished " else Who & " finished ")
+                                           & Spoken_Place (P) & "."));
+                        end;
+                     end if;
                   end if;
                when Picked => Audio.Play (Audio.Pickup, (if Mine then 0.8 else Lv * 0.35), Pn);
                when Fired => Audio.Play (Audio.Launch, Lv, Pn);
@@ -1054,6 +1312,11 @@ package body App is
                   Audio.Play (Audio.Bang, Lv, Pn);
                   Kick (E.Car, 1.0);
                when Scared => Audio.Play (Audio.Moan, Lv, Pn);
+               when Duel_Won =>
+                  if E.Car in 1 .. State.Count then
+                     Announce ("Player " & (if State.Racers (E.Car).Human = 1 then "one" else "two")
+                               & " wins the duel!");
+                  end if;
                when Bells => Audio.Play (Audio.Jingle, Float'Max (0.5, Lv), Pn);
                when others => null;
             end case;
@@ -1097,8 +1360,11 @@ package body App is
          end if;
       end loop;
       P.Music := (if Mode = Title then 1 else 2);
-      P.Music_Level := (if Mode = Racing then 0.25 else 0.45);
-      P.Master := (if Muted then 0.0 elsif Mode = Paused then 0.2 elsif Mode = Title then 0.5 else 0.8);
+      P.Music_Level := (if Mode = Racing then 0.5 else 0.9) * Float (Music_Volume) / 10.0;
+      P.Master := Float (Sound_Volume) / 10.0
+        * (if Muted or else Mode = Editing_Track then 0.0
+           elsif Mode in Paused | Options then 0.25
+           elsif Mode = Title then 0.6 else 1.0);
       Audio.Set (P);
    end Update_Sound;
 
@@ -1159,8 +1425,16 @@ package body App is
       Accum := Accum + Dt;
       while Accum >= Race.Dt and then Steps < 30 loop
          declare
-            I : Race.Input := (if Mode = Racing then Player_Input else (others => <>));
+            I : Race.Input := (if Mode = Racing then Player_Input
+                               elsif Mode = Replay and then Replay_Pos < Natural (Recording.Length)
+                               then Recording (Replay_Pos)
+                               else (others => <>));
          begin
+            if Mode = Replay then
+               Replay_Pos := Replay_Pos + 1;
+            elsif not Race.State.Attract and then not Net_Race and then Can_Replay then
+               Recording.Append (I);
+            end if;
             if Net_Race then
                I.Keys (1) := I.P1;
                I.Fires (1) := I.Fire1;
@@ -1174,7 +1448,7 @@ package body App is
                end if;
             end if;
          end;
-         if Play = Time_Trial and then not Race.State.Attract then
+         if Play = Time_Trial and then not Race.State.Attract and then Mode /= Replay then
             Trial_Step;
          end if;
          Accum := Accum - Race.Dt;
@@ -1344,13 +1618,51 @@ package body App is
 
    Edit_Clock : Float := 0.0;
 
+   function Paint_Name (N : Natural) return String is
+     (case N is
+         when 0 => "RED", when 1 => "BLUE", when 2 => "YELLOW", when 3 => "GREEN",
+         when 4 => "PURPLE", when 5 => "ORANGE", when 6 => "WHITE", when others => "TEAL");
+
+   function Volume_Bar (V : Natural) return String is
+      B : String (1 .. 10) := (others => '-');
+   begin
+      for K in 1 .. V loop
+         B (K) := '|';
+      end loop;
+      return B & "  " & Img (V);
+   end Volume_Bar;
+
    procedure Draw_Frame (W, H : Natural; Alpha, Dt : Float) is
       Wf : constant Float := Float (W);
       Hf : constant Float := Float (H);
    begin
       View.Begin_Frame (Alpha, Dt);
       Overlay.Begin_Frame (W, H);
-      if Mode = Editing_Track then
+      if Mode = Options then
+         if Return_To = Title then
+            View.Render_View (0, 0, W, H, 1, Race.Focus, View.Chase, Orbit => True, Dt => Dt);
+         else
+            View.Render_View (0, 0, W, H, 1, Race.Focus, Cameras (1), False, 0.0);
+         end if;
+         Overlay.Clear_Menu;
+         Overlay.Add_Item ("CAR, PLAYER 1", Models.Style_Name (Car_Choice (1)), True);
+         Overlay.Add_Item ("COLOUR, PLAYER 1", Paint_Name (Paint_Choice (1)), True);
+         Overlay.Add_Item ("CAR, PLAYER 2", Models.Style_Name (Car_Choice (2)), True);
+         Overlay.Add_Item ("COLOUR, PLAYER 2", Paint_Name (Paint_Choice (2)), True);
+         Overlay.Add_Item ("SOUND", Volume_Bar (Sound_Volume), True);
+         Overlay.Add_Item ("MUSIC", Volume_Bar (Music_Volume), True);
+         Overlay.Add_Item ("ANNOUNCER", (if not Speech.Available then "NOT FOUND (ESPEAK-NG)"
+                                         else (case Voice is
+                                                  when Voice_Off => "OFF",
+                                                  when Voice_Woman => "FEMALE",
+                                                  when Voice_Man => "MALE")), True);
+         Overlay.Add_Item ("SHADOWS", (if View.Shadows_On then "ON" else "OFF"), True);
+         Overlay.Add_Item ("CONTROLLER, PLAYER 1", Pad_Name (1), True);
+         Overlay.Add_Item ("CONTROLLER, PLAYER 2", Pad_Name (2), True);
+         Overlay.Add_Item ("BACK");
+         Overlay.Add_Note (Img (Pads.Device_Count) & " CONTROLLERS PLUGGED IN");
+         Overlay.Draw_Menu ("OPTIONS", Choice);
+      elsif Mode = Editing_Track then
          GL.Viewport (0, 0, GL.GLsizei (W), GL.GLsizei (H));
          GL.Clear_Color (0.1, 0.1, 0.12, 1.0);
          GL.Clear (16#4100#);   --  colour and depth
@@ -1381,8 +1693,11 @@ package body App is
                            Play in Single_Race | Championship);
          Overlay.Add_Item ("DIFFICULTY", Race.Difficulty'Image (Level), True);
          Overlay.Add_Item ("PICK-UPS", (if Items_On then "ON" else "OFF"), True);
+         Overlay.Add_Item ("TIME", Air.Time_Name (Air.Time), True);
+         Overlay.Add_Item ("WEATHER", Air.Weather_Name (Air.Weather), True);
          Overlay.Add_Item ("CAMERA, PLAYER 1", View.Camera_Kind'Image (Cameras (1)), True);
          Overlay.Add_Item ("CAMERA, PLAYER 2", View.Camera_Kind'Image (Cameras (2)), True);
+         Overlay.Add_Item ("OPTIONS");
          Overlay.Add_Item ("TRACK EDITOR");
          Overlay.Add_Item ("QUIT");
          for P in Pads.Player_Number loop
@@ -1402,6 +1717,16 @@ package body App is
              elsif Records.Best_Lap (Track) > 0.0
              then "LAP RECORD ON " & Tracks.Name (Track) & ": " & Overlay.Time_Img (Records.Best_Lap (Track))
              else Tracks.Name (Track) & " - " & Img (Laps) & (if Laps = 1 then " LAP" else " LAPS")));
+      elsif Mode = Replay then
+         View.Render_View (0, 0, W, H, 1, Replay_Car, Replay_Cam, False, Dt);
+         Overlay.Race_Hud (0.0, 0.0, Wf, Hf, Replay_Car, "C  " & View.Camera_Kind'Image (Replay_Cam), False, 0.0);
+         if Integer (Race.State.Time * 2.0) mod 2 = 0 then
+            Overlay.Banner ("REPLAY", 0.13, 56.0);
+         end if;
+         Overlay.Banner ((if Race.State.Racers (Replay_Car).Human > 0
+                          then "PLAYER " & Img (Race.State.Racers (Replay_Car).Human)
+                          else Trim_Name (Race.State.Racers (Replay_Car).Name))
+                         & "     LEFT RIGHT: ANOTHER CAR     C: CAMERA     ENTER: BACK", 0.95, 22.0);
       elsif Play = Duel_Play then
          --  one view for both, high over the race's own camera
          View.Render_View (0, 0, W, H, 1, Race.Focus, View.High, False, Dt, Shared => True);
@@ -1411,10 +1736,11 @@ package body App is
             Overlay.Clear_Menu;
             Overlay.Add_Item ("CONTINUE");
             Overlay.Add_Item ("DUEL AGAIN");
+            Overlay.Add_Item ("OPTIONS");
             Overlay.Add_Item ("QUIT TO THE TITLE");
             Overlay.Draw_Menu ("PAUSED", Choice, Tracks.Name (Track));
          elsif Mode = Results then
-            Overlay.Banner ("ENTER: THE TITLE     R: DUEL AGAIN", 0.94, 22.0);
+            Overlay.Banner ("ENTER: THE TITLE     R: DUEL AGAIN     W: WATCH THE REPLAY", 0.94, 22.0);
          end if;
       elsif In_Net_Race then
          View.Render_View (0, 0, W, H, 1, Race.Focus, Cameras (1), False, Dt);
@@ -1453,15 +1779,17 @@ package body App is
             Overlay.Clear_Menu;
             Overlay.Add_Item ("CONTINUE");
             Overlay.Add_Item ("RACE AGAIN");
+            Overlay.Add_Item ("OPTIONS");
             Overlay.Add_Item ("QUIT TO THE TITLE");
             Overlay.Draw_Menu ("PAUSED", Choice, Tracks.Name (Track));
          elsif Mode = Results then
             if Play = Championship then
                Overlay.Results (Cup_Name (Cup) & " - RACE " & Img (Round) & " OF " & Img (Cup_Tracks (Cup)'Length));
-               Overlay.Banner ("ENTER: THE STANDINGS", 0.94, 22.0);
+               Overlay.Banner ("ENTER: THE STANDINGS     W: WATCH THE REPLAY", 0.94, 22.0);
             else
                Overlay.Results (Tracks.Name (Race_Track));
-               Overlay.Banner ("ENTER: THE TITLE     R: RACE AGAIN     N: THE NEXT TRACK", 0.94, 22.0);
+               Overlay.Banner ("ENTER: THE TITLE     R: RACE AGAIN     N: THE NEXT TRACK     W: WATCH THE REPLAY",
+                               0.94, 22.0);
             end if;
          elsif Mode = Standings then
             declare
@@ -1522,14 +1850,41 @@ package body App is
       elsif Shot_File /= null then
          --  a screenshot: the race run at its own pace, then the picture taken
          if Mode /= Title then
-            while Race.State.Phase /= Race.Running or else Race.State.Time < Shot_At loop
-               Race.Step ((others => <>), Autopilot => True);
+            while Race.State.Phase = Race.Countdown
+              or else (Race.State.Phase = Race.Running and then Race.State.Time < Shot_At)
+            loop
+               Recording.Append ((others => <>));
+               Race.Step ((others => <>), Autopilot => Autopilot);
                if Play = Time_Trial then
                   Trial_Step;
                end if;
                Hear_Events;
                View.Begin_Frame (1.0, Race.Dt);
             end loop;
+            if Env ("ADAMACHINES_REPLAY_CHECK") /= "" then
+               --  the race once more from what was recorded: every car must end where it did
+               declare
+                  type Places is array (Race.Car_Index) of Vec;
+                  Before : Places;
+                  Steps : constant Natural := Natural (Recording.Length);
+                  Worst : Float := 0.0;
+               begin
+                  for I in 1 .. Race.State.Count loop
+                     Before (I) := Race.State.Racers (I).Car.P;
+                  end loop;
+                  Start_Replay;
+                  for K in 0 .. Steps - 1 loop
+                     Race.Step (Recording (K), Autopilot => Autopilot);
+                  end loop;
+                  for I in 1 .. Race.State.Count loop
+                     Worst := Float'Max (Worst, Distance (Before (I), Race.State.Racers (I).Car.P));
+                  end loop;
+                  Ada.Text_IO.Put_Line (Ada.Text_IO.Standard_Error, "replay check:" & Natural'Image (Steps)
+                                        & " steps, cars off by at most" & Float'Image (Worst));
+                  Mode := Replay;
+                  Replay_Pos := Steps;
+               end;
+            end if;
             if Env ("ADAMACHINES_SHOW") /= "" then
                Mode := Mode_Kind'Value (Env ("ADAMACHINES_SHOW"));
                if Mode = Standings then
@@ -1538,14 +1893,36 @@ package body App is
             end if;
          end if;
          for K in 1 .. 90 loop   --  let the camera settle
-            Race.Step ((others => <>), Autopilot => True);
+            if Mode = Replay and then Replay_Pos < Natural (Recording.Length) then
+               Race.Step (Recording (Replay_Pos), Autopilot => Autopilot);
+               Replay_Pos := Replay_Pos + 1;
+            else
+               Race.Step ((others => <>), Autopilot => True);
+            end if;
             if Play = Time_Trial and then Mode = Racing then
                Trial_Step;
             end if;
             Hear_Events;
             Draw_Frame (W, H, 1.0, 1.0 / 120.0);
          end loop;
-         Save_Shot (W, H);
+         if Env ("ADAMACHINES_FRAMES") /= "" then
+            --  a run of pictures, thirty a second of the race, for a moving picture
+            declare
+               Base : constant String := Shot_File.all;
+            begin
+               for F in 1 .. Natural'Value (Env ("ADAMACHINES_FRAMES")) loop
+                  for K in 1 .. 4 loop
+                     Race.Step ((others => <>), Autopilot => True);
+                     Hear_Events;
+                  end loop;
+                  Draw_Frame (W, H, 1.0, 4.0 * Race.Dt);
+                  Shot_File := new String'(Base & "-" & (1 .. 4 - Img (F)'Length => '0') & Img (F) & ".ppm");
+                  Save_Shot (W, H);
+               end loop;
+            end;
+         else
+            Save_Shot (W, H);
+         end if;
          Gtk.Main.Main_Quit;
          return True;
       end if;
@@ -1577,6 +1954,12 @@ package body App is
          Message_T := Message_T - Dt;
       end if;
       Update_Feel (Dt);
+      if Mode = Replay and then Replay_Pos >= Natural (Recording.Length) then
+         Replay_End_T := Replay_End_T + Dt;
+         if Replay_End_T > 3.0 then
+            End_Replay;
+         end if;
+      end if;
       if Mode = Racing and then All_Done then
          Done_T := Done_T + Dt;
          if Done_T > 2.5 then
@@ -1646,6 +2029,12 @@ package body App is
       if Env ("ADAMACHINES_PLAYERS") /= "" then
          Players_Choice := Positive'Value (Env ("ADAMACHINES_PLAYERS"));
       end if;
+      if Env ("ADAMACHINES_TIME") /= "" then
+         Air.Time := Air.Time_Kind'Value (Env ("ADAMACHINES_TIME"));
+      end if;
+      if Env ("ADAMACHINES_WEATHER") /= "" then
+         Air.Weather := Air.Weather_Kind'Value (Env ("ADAMACHINES_WEATHER"));
+      end if;
       if Env ("ADAMACHINES_PLAY") /= "" then
          Play := Play_Kind'Value (Env ("ADAMACHINES_PLAY"));
       end if;
@@ -1655,18 +2044,24 @@ package body App is
       end if;
       if Env ("ADAMACHINES_SHOT") /= "" then
          Shot_File := new String'(Env ("ADAMACHINES_SHOT"));
+         Autopilot := Autopilot or else Env ("ADAMACHINES_SHOT_AFTER") = "";   --  the race run by itself
          if Env ("ADAMACHINES_SHOT_AT") /= "" then
             Shot_At := Float'Value (Env ("ADAMACHINES_SHOT_AT"));
          end if;
       end if;
 
+      Shot_Off := Shot_File = null;
       if Env ("ADAMACHINES_SHOT_AFTER") /= "" then
          Shot_After := Float'Value (Env ("ADAMACHINES_SHOT_AFTER"));
       end if;
       if Env ("ADAMACHINES_NAME") /= "" then
          Player_Name := As_Name (Env ("ADAMACHINES_NAME"));
       end if;
-      if Env ("ADAMACHINES_EDITOR") /= "" then
+      if Env ("ADAMACHINES_OPTIONS") /= "" then
+         To_Title;
+         Return_To := Title;
+         Mode := Options;
+      elsif Env ("ADAMACHINES_EDITOR") /= "" then
          To_Title;
          Mode := Editing_Track;
          if Env ("ADAMACHINES_EDITOR") = "drive" then

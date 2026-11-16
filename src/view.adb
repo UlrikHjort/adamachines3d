@@ -18,6 +18,8 @@ with Overlay;
 with Models;
 with Palette;
 with Scenery;
+with Terrain;
+with Air;
 with Cars;
 with GL; use GL;
 with Lin; use Lin;
@@ -31,6 +33,8 @@ package body View is
    use type Interfaces.C.int;
    use type Interfaces.C.unsigned;
    use type System.Address;
+   use type Air.Time_Kind;
+   use type Air.Weather_Kind;
 
    function G (X : Float) return Gdouble is (Gdouble (X));
    function F (X : Float) return GLfloat is (GLfloat (X));
@@ -138,6 +142,8 @@ package body View is
 
    --  The light and air of the place
    Sky_C       : Color := (0.75, 0.72, 0.66, 1.0);
+   Day_Sun : constant V3 := Normal ((0.62, 0.72, 0.42));   --  well up, but low enough for shadows to show
+   Sun : V3 := Day_Sun;
    Sun_Col   : V3 := (0.75, 0.72, 0.65);
    Ambient   : V3 := (0.45, 0.45, 0.48);
    Night     : Boolean := False;
@@ -195,6 +201,40 @@ package body View is
          when others =>
             Sky_C := (0.74, 0.70, 0.64, 1.0);   --  the walls of the room
       end case;
+      --  The time of day and the weather over it all
+      Sun := Day_Sun;
+      if not Night then
+         case Air.Time is
+            when Air.Day => null;
+            when Air.Sunset =>
+               Sun := Normal ((0.85, 0.28, 0.45));   --  low: long shadows
+               Sun_Col := (0.95, 0.58, 0.32);
+               Ambient := (0.36, 0.30, 0.34);
+               Sky_C := (if Scenery.Indoors then (0.62, 0.50, 0.44, 1.0) else (0.96, 0.62, 0.42, 1.0));
+            when Air.Night =>
+               Night := True;
+               Sun_Col := (0.13, 0.15, 0.26);
+               Ambient := (0.10, 0.10, 0.15);
+               Sky_C := (if Scenery.Indoors then (0.06, 0.06, 0.08, 1.0) else (0.04, 0.05, 0.11, 1.0));
+         end case;
+      end if;
+      if not Scenery.Indoors and then Theme not in Moon | Alien | Fish_Tank and then Vehicle /= Plane then
+         case Air.Weather is
+            when Air.Clear => null;
+            when Air.Rain =>
+               Sun_Col := (0.35 * Sun_Col.X, 0.35 * Sun_Col.Y, 0.37 * Sun_Col.Z);
+               Ambient := (Ambient.X * 1.1, Ambient.Y * 1.1, Ambient.Z * 1.15);
+               Sky_C := (if Air.Time = Air.Night then (0.05, 0.05, 0.07, 1.0) else (0.52, 0.55, 0.60, 1.0));
+               Fog_Near := 700.0;
+               Fog_Far := 4500.0;
+            when Air.Snow =>
+               Sun_Col := (0.45 * Sun_Col.X, 0.45 * Sun_Col.Y, 0.48 * Sun_Col.Z);
+               Ambient := (Ambient.X * 1.25, Ambient.Y * 1.25, Ambient.Z * 1.3);
+               Sky_C := (if Air.Time = Air.Night then (0.08, 0.08, 0.11, 1.0) else (0.80, 0.83, 0.88, 1.0));
+               Fog_Near := 600.0;
+               Fog_Far := 4000.0;
+         end case;
+      end if;
    end Set_Air;
 
 
@@ -221,7 +261,7 @@ package body View is
       --  The things in the way
       Models.Set_Picture;
       for I in 1 .. Item_Count loop
-         Models.Item (Static_B, Get_Item (I), Ground_Y, Fly_Height);
+         Models.Item (Static_B, Get_Item (I), Ground_Y + Terrain.Hills (Get_Item (I).S.C), Fly_Height);
       end loop;
       Upload (Static_B, Static => True);
    end Build_World;
@@ -267,8 +307,14 @@ package body View is
    function Base_Y return Float is (if Vehicle = Plane then Fly_Height else Ground_Y);
 
    --  How high the car's body rides: its jump, the plane's height, its fall
-   function Ride (C : Cars.Car) return Float is
-     (Base_Y + C.Z - (if C.Fall_T > 0.0 then 500.0 * C.Fall_T * C.Fall_T else 0.0));
+   function Land (P : Geom.Vec; Hint : Integer := -1) return Float is
+     (if Vehicle = Plane then 0.0 else Terrain.Height (P, Hint));
+
+   function Ride (C : Cars.Car; Hint : Integer := -1) return Float is
+     (Base_Y + Land (C.P, Hint) + C.Z - (if C.Fall_T > 0.0 then 500.0 * C.Fall_T * C.Fall_T else 0.0));
+
+   --  The blobs of shadow under things: only when the sun's own shadows are not there
+   function Blobs return Boolean;
 
    type GLfloat_3 is array (0 .. 2) of GLfloat with Convention => C;
 
@@ -291,7 +337,7 @@ package body View is
    --  Particles: smoke, dust, sparks, spray, flame and confetti
    ---------------------------------------------------------------------------
 
-   type Particle_Kind is (Smoke, Dust, Spark, Spray, Flame, Confetti, Bubble);
+   type Particle_Kind is (Smoke, Dust, Spark, Spray, Flame, Confetti, Bubble, Raindrop, Snowflake);
    type Particle is record
       Kind : Particle_Kind := Smoke;
       P, V : V3;
@@ -299,7 +345,7 @@ package body View is
       Size0, Size1 : Float := 4.0;  --  how big it starts and ends
       C : Color;
    end record;
-   Max_Particles : constant := 1500;
+   Max_Particles : constant := 4000;
    Parts : array (1 .. Max_Particles) of Particle;
    Next_Part : Positive := 1;
    Rand : Geom.Seed := 4242;
@@ -322,7 +368,7 @@ package body View is
      (C.R + (1.0 - C.R) * F, C.G + (1.0 - C.G) * F, C.B + (1.0 - C.B) * F, C.A);
 
    procedure Hear (E : Race.Event) is
-      P : constant V3 := (E.P.X, Base_Y + 5.0, E.P.Y);
+      P : constant V3 := (E.P.X, Base_Y + Terrain.Hills (E.P) + 5.0, E.P.Y);
       Watery : constant Boolean := Theme in Bath | Fish_Tank | Ice | Beach | Arctic;
    begin
       case E.Kind is
@@ -336,7 +382,7 @@ package body View is
          when Race.Fell | Race.Splash =>
             if Watery or else E.Kind = Race.Splash then
                for K in 1 .. 26 loop
-                  Spawn (Spray, (P.X, Ground_Y + 1.0, P.Z), (Spr * 60.0, 80.0 + Rnd * 120.0, Spr * 60.0),
+                  Spawn (Spray, (P.X, P.Y - 4.0, P.Z), (Spr * 60.0, 80.0 + Rnd * 120.0, Spr * 60.0),
                          0.7 + Rnd * 0.4, 3.0, 5.0, (0.85, 0.92, 1.0, 0.8));
                end loop;
             end if;
@@ -345,7 +391,7 @@ package body View is
                Leans (E.Car).Bounce := -0.14;
             end if;
             for K in 1 .. 14 loop
-               Spawn (Dust, (P.X + Spr * 10.0, Base_Y + 2.0, P.Z + Spr * 10.0), (Spr * 40.0, 10.0 + Rnd * 20.0, Spr * 40.0),
+               Spawn (Dust, (P.X + Spr * 10.0, P.Y - 3.0, P.Z + Spr * 10.0), (Spr * 40.0, 10.0 + Rnd * 20.0, Spr * 40.0),
                       0.8 + Rnd * 0.5, 5.0, 14.0, Lighter (Ground_At (E.P), 0.2));
             end loop;
          when Race.Exploded =>
@@ -382,10 +428,39 @@ package body View is
 
    --  What the cars throw up as they go
    Bubble_T : Float := 0.0;
+   Weather_T : Float := 0.0;
+   Weather_Eye : V3;   --  where the rain and snow fall round: the first camera
 
    procedure Emit (Dt : Float) is
       St : State_Type renames Race.State;
    begin
+      --  rain and snow, round the first camera, out of doors
+      if Air.Weather /= Air.Clear and then not Scenery.Indoors and then Theme not in Moon | Alien | Fish_Tank
+        and then Vehicle /= Plane
+      then
+         Weather_T := Weather_T + Dt;
+         declare
+            Per : constant Float := (if Air.Weather = Air.Rain then 1.0 / 900.0 else 1.0 / 260.0);
+         begin
+            while Weather_T > Per loop
+               Weather_T := Weather_T - Per;
+               declare
+                  A : constant Float := 2.0 * Geom.Pi * Rnd;
+                  D : constant Float := 420.0 * Sqrt (Rnd);
+                  P : constant V3 := (Weather_Eye.X + D * Cos (A), Weather_Eye.Y + 80.0 + 180.0 * Rnd,
+                                      Weather_Eye.Z + D * Sin (A));
+               begin
+                  if Air.Weather = Air.Rain then
+                     Spawn (Raindrop, P, (-30.0, -420.0 - 60.0 * Rnd, 10.0), 1.2, 0.35, 0.35, (0.75, 0.80, 0.90, 0.45));
+                  else
+                     Spawn (Snowflake, P, (Spr * 8.0, -35.0 - 15.0 * Rnd, Spr * 8.0), 9.0, 1.6 + 1.0 * Rnd,
+                            1.6 + 1.0 * Rnd, (1.0, 1.0, 1.0, 0.95));
+                  end if;
+               end;
+            end loop;
+         end;
+      end if;
+
       --  bubbles from the air stones of the fish tank
       if Theme = Fish_Tank then
          Bubble_T := Bubble_T + Dt;
@@ -406,7 +481,7 @@ package body View is
             H : constant Float := C.H;
             Fwd : constant V3 := (Cos (H), 0.0, Sin (H));
             Sd : constant V3 := (-Fwd.Z, 0.0, Fwd.X);
-            Back : constant V3 := (C.P.X, Ride (C) + 2.0, C.P.Y) + (-11.0) * Fwd;
+            Back : constant V3 := (C.P.X, Ride (C, St.Racers (I).Index) + 2.0, C.P.Y) + (-11.0) * Fwd;
             Wheeled : constant Boolean := Vehicle not in Plane | Boat | Hovercraft | Submarine;
             Rate : Float := 0.0;
          begin
@@ -459,13 +534,26 @@ package body View is
                   if Pt.Kind = Confetti then
                      Pt.V := (1.0 - 2.0 * Dt) * Pt.V;
                   end if;
-                  if Pt.P.Y < Ground_Y then
-                     Pt.P.Y := Ground_Y;
+                  if Pt.P.Y < Ground_Y + Terrain.Hills ((Pt.P.X, Pt.P.Z)) then
+                     Pt.P.Y := Ground_Y + Terrain.Hills ((Pt.P.X, Pt.P.Z));
                      Pt.V := (0.5 * Pt.V.X, -0.3 * Pt.V.Y, 0.5 * Pt.V.Z);
                   end if;
                when Smoke | Dust | Flame =>
                   Pt.V := (1.0 - 1.5 * Dt) * Pt.V;
                   Pt.V.Y := Pt.V.Y + 6.0 * Dt;
+               when Raindrop =>
+                  if Pt.P.Y < Ground_Y + Terrain.Hills ((Pt.P.X, Pt.P.Z)) then
+                     Pt.Life := 0.0;
+                     if Rnd < 0.15 then
+                        Spawn (Spray, (Pt.P.X, Pt.P.Y + 0.5, Pt.P.Z), (Spr * 15.0, 25.0 + Rnd * 20.0, Spr * 15.0),
+                               0.25, 0.6, 1.0, (0.8, 0.85, 0.95, 0.5));
+                     end if;
+                  end if;
+               when Snowflake =>
+                  Pt.P.X := Pt.P.X + Sin (Clock * 1.7 + Pt.Span * 13.0) * 10.0 * Dt;
+                  if Pt.P.Y < Ground_Y + Terrain.Hills ((Pt.P.X, Pt.P.Z)) then
+                     Pt.Life := 0.0;
+                  end if;
                when Bubble =>
                   Pt.P.X := Pt.P.X + Sin (Clock * 6.0 + Pt.Span * 40.0) * 12.0 * Dt;
                   if Pt.P.Y > Ground_Y + 455.0 then
@@ -520,11 +608,11 @@ package body View is
                T : constant Float := 1.0 - Pt.Life / Pt.Span;   --  0 new .. 1 gone
                Sz : constant Float := Pt.Size0 + (Pt.Size1 - Pt.Size0) * T;
                A : constant Float := Pt.C.A * (if Pt.Kind in Smoke | Dust then (1.0 - T) * Float'Min (1.0, T * 8.0)
-                                               elsif Pt.Kind = Bubble then 1.0
+                                               elsif Pt.Kind in Bubble | Raindrop | Snowflake then 1.0
                                                else 1.0 - T * T);
                C : constant Color := (Pt.C.R, Pt.C.G, Pt.C.B, A);
                DR : constant V3 := Sz * R;
-               DU : constant V3 := Sz * U;
+               DU : constant V3 := (if Pt.Kind = Raindrop then 0.022 * Pt.V else Sz * U);
             begin
                Vertex_Full (Part_B, Pt.P - DR - DU, C, 0.0, 1.0);
                Vertex_Full (Part_B, Pt.P + DR - DU, C, 1.0, 1.0);
@@ -545,6 +633,7 @@ package body View is
    Max_Marks : constant := 6000;
    type Mark is record
       A, B : Geom.Vec;
+      YA, YB : Float := 0.0;   --  the ground under each end
       W : Float := 2.4;
       C : Color;
    end record;
@@ -596,7 +685,9 @@ package body View is
                Art.Skid_Look (Strength, C.Under, Look, Alpha, W, Seen);
                if Seen then
                   for K in 1 .. (if Bike then 1 else 2) loop
-                     Marks (Next_Mark) := (Last_Wheels (I) (K), Now (K), W, (Look.R, Look.G, Look.B, Alpha));
+                     Marks (Next_Mark) := (Last_Wheels (I) (K), Now (K),
+                                           Land (Last_Wheels (I) (K), St.Racers (I).Index),
+                                           Land (Now (K), St.Racers (I).Index), W, (Look.R, Look.G, Look.B, Alpha));
                      Next_Mark := (if Next_Mark = Max_Marks then 1 else Next_Mark + 1);
                      Mark_Count := Natural'Min (Max_Marks, Mark_Count + 1);
                   end loop;
@@ -619,8 +710,8 @@ package body View is
             M : Mark renames Marks (K);
             D : constant Geom.Vec := Geom.Normal ((M.B.X - M.A.X, M.B.Y - M.A.Y));
             Across : constant V3 := (-D.Y * M.W / 2.0, 0.0, D.X * M.W / 2.0);
-            A : constant V3 := (M.A.X, Ground_Y + 0.05, M.A.Y);
-            B : constant V3 := (M.B.X, Ground_Y + 0.05, M.B.Y);
+            A : constant V3 := (M.A.X, Ground_Y + M.YA + 0.05, M.A.Y);
+            B : constant V3 := (M.B.X, Ground_Y + M.YB + 0.05, M.B.Y);
          begin
             Quad (Mark_B, A - Across, A + Across, B + Across, B - Across, M.C, Lit => False);
          end;
@@ -689,24 +780,38 @@ package body View is
             C  : Cars.Car renames R.Car;
             P  : constant Geom.Vec := Interp_P (C, Alpha);
             H  : constant Float := Interp_H (C, Alpha);
-            Y  : constant Float := Ride (C);
+            Y  : constant Float := Ride (C, R.Index);
             Fwd : constant V3 := (Cos (H), 0.0, Sin (H));
+            F2 : constant Geom.Vec := Geom.Dir (H);
+            S2 : constant Geom.Vec := Geom.Perp (F2);
+            --  the slope of the land under it: nose up a hill, leaning with a bank
+            Slope_Pitch : constant Float :=
+              (if Vehicle = Plane or else C.Air then 0.0
+               else Arctan ((Land (P + F2 * 8.0, R.Index) - Land (P - F2 * 8.0, R.Index)) / 16.0));
+            Slope_Roll : constant Float :=
+              (if Vehicle = Plane or else C.Air then 0.0
+               else Arctan ((Land (P - S2 * 5.0, R.Index) - Land (P + S2 * 5.0, R.Index)) / 10.0));
             Bob : constant Float :=
               (if Vehicle in Boat | Hovercraft | Submarine then 0.8 * Sin (Clock * 3.0 + Float (I)) else 0.0);
             Pc : constant Palette.RGB := Palette.Paint (R.Paint);
          begin
             Car_First (I) := Vertices (Dyn_B);
-            Mesh.Set_Tilt ((P.X, Y + Bob, P.Y), Fwd, Leans (I).Pitch + Leans (I).Bounce, Leans (I).Roll);
-            Models.Vehicle (Dyn_B, Glass_B, (P.X, Y + Bob, P.Y), H, (Pc.R, Pc.G, Pc.B, 1.0));
+            Mesh.Set_Tilt ((P.X, Y + Bob, P.Y), Fwd, Leans (I).Pitch + Leans (I).Bounce + Slope_Pitch,
+                           Leans (I).Roll + Slope_Roll);
+            Models.Vehicle (Dyn_B, Glass_B, (P.X, Y + Bob, P.Y), H, (Pc.R, Pc.G, Pc.B, 1.0),
+                            Style => Styles (I) mod Models.Styles, Number => I);
             Mesh.No_Tilt;
             Car_Count (I) := Vertices (Dyn_B) - Car_First (I);
             if not Cars.Falling (C) then
-               declare
-                  Lift : constant Float := Y - Ground_Y;
-                  Dark : constant Float := 0.45 / (1.0 + Lift / 40.0);
-               begin
-                  Disc (Glass_B, (P.X, Ground_Y + 0.3, P.Y), 15.0, 9.0, H, (0.0, 0.0, 0.0, Dark), 14);
-               end;
+               if Blobs then
+                  declare
+                     Lift : constant Float := Y - Ground_Y;
+                     Dark : constant Float := 0.45 / (1.0 + Lift / 40.0);
+                  begin
+                     Disc (Glass_B, (P.X, Ground_Y + Land (P, R.Index) + 0.3, P.Y), 15.0, 9.0, H,
+                           (0.0, 0.0, 0.0, Dark), 14);
+                  end;
+               end if;
                if R.Shield_T > 0.0 then
                   Sphere (Glass_B, (P.X, Y + 6.0, P.Y), 18.0, (0.3, 0.8, 1.0, 0.22), 14);
                end if;
@@ -721,7 +826,8 @@ package body View is
 
       --  The ghost of the best lap
       if Ghost_On then
-         Models.Vehicle (Glass_B, Glass_B, (Ghost_P.X, Base_Y, Ghost_P.Y), Ghost_H, (0.85, 0.9, 1.0, 1.0), 0.35);
+         Models.Vehicle (Glass_B, Glass_B, (Ghost_P.X, Base_Y + Land (Ghost_P), Ghost_P.Y), Ghost_H,
+                         (0.85, 0.9, 1.0, 1.0), 0.35);
       end if;
 
       --  The things that move across the road
@@ -734,9 +840,11 @@ package body View is
          begin
             Mover_At (M, St.Clock, P, Hd, Seen, Lift);
             if Seen then
-               Models.Mover (Dyn_B, Glass_B, M, P, Hd, Lift, Ground_Y, Clock);
-               Disc (Glass_B, (P.X, Ground_Y + 0.25, P.Y), M.Radius * 1.1, M.Radius * 1.1, 0.0,
-                     (0.0, 0.0, 0.0, 0.3 / (1.0 + Lift / 30.0)), 12);
+               Models.Mover (Dyn_B, Glass_B, M, P, Hd, Lift, Ground_Y + Terrain.Hills (P), Clock);
+               if Blobs then
+                  Disc (Glass_B, (P.X, Ground_Y + Terrain.Hills (P) + 0.25, P.Y), M.Radius * 1.1, M.Radius * 1.1, 0.0,
+                        (0.0, 0.0, 0.0, 0.3 / (1.0 + Lift / 30.0)), 12);
+               end if;
             end if;
          end;
       end loop;
@@ -748,27 +856,29 @@ package body View is
                P : constant Geom.Vec := Boxes (K).P;
                A : constant Float := Clock * 1.7 + Float (K);
                Fwd : constant V3 := (Cos (A), 0.0, Sin (A));
-               Y : constant Float := Base_Y + 9.0 + 2.0 * Sin (Clock * 3.0 + Float (K));
+               Y : constant Float := Base_Y + Land (P) + 9.0 + 2.0 * Sin (Clock * 3.0 + Float (K));
                Hue : constant Float := Clock * 2.0 + Float (K);
                C : constant Color := (0.65 + 0.35 * Sin (Hue), 0.65 + 0.35 * Sin (Hue + 2.1), 0.65 + 0.35 * Sin (Hue + 4.2), 1.0);
             begin
                Block (Dyn_B, (P.X, Y, P.Y), Fwd, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, C);
                Block (Dyn_B, (P.X, Y, P.Y), Fwd, 0.0, 0.0, 0.0, 5.3, 1.2, 5.3, (1.0, 1.0, 1.0, 1.0));
                Block (Dyn_B, (P.X, Y, P.Y), Fwd, 0.0, 0.0, 0.0, 1.2, 5.3, 5.3, (1.0, 1.0, 1.0, 1.0));
-               Disc (Glass_B, (P.X, Ground_Y + 0.25, P.Y), 8.0, 8.0, 0.0, (0.0, 0.0, 0.0, 0.3), 10);
+               if Blobs then
+                  Disc (Glass_B, (P.X, Ground_Y + Land (P) + 0.25, P.Y), 8.0, 8.0, 0.0, (0.0, 0.0, 0.0, 0.3), 10);
+               end if;
             end;
          end if;
       end loop;
       for S of Slicks loop
          if S.Life > 0.0 then
-            Disc (Glass_B, (S.P.X, Ground_Y + 0.35, S.P.Y), 22.0, 18.0, 0.7, (0.02, 0.02, 0.03, 0.85), 18);
+            Disc (Glass_B, (S.P.X, Ground_Y + Land (S.P) + 0.35, S.P.Y), 22.0, 18.0, 0.7, (0.02, 0.02, 0.03, 0.85), 18);
          end if;
       end loop;
       for M of Rockets loop
          if M.Life > 0.0 then
             declare
                Fwd : constant V3 := (Cos (M.H), 0.0, Sin (M.H));
-               O : constant V3 := (M.P.X, Base_Y + 8.0, M.P.Y);
+               O : constant V3 := (M.P.X, Base_Y + Land (M.P) + 8.0, M.P.Y);
             begin
                Barrel (Dyn_B, O, Fwd, 1.6, 5.0, (0.85, 0.15, 0.10, 1.0), 8);
                Spawn (Smoke, O + (-6.0) * Fwd, (Spr * 5.0, 4.0, Spr * 5.0), 0.6, 2.5, 7.0, (0.8, 0.8, 0.8, 0.6));
@@ -782,7 +892,33 @@ package body View is
    --  The cameras: one for each player's view
    ---------------------------------------------------------------------------
 
+   --  Where the TV cameras stand: beside the road, every so often, one side then the other
+   Max_Spots : constant := 64;
+   Spots : array (1 .. Max_Spots) of V3;
+   Spot_Count : Natural := 0;
+
+   procedure Place_Spots is
+      K : Natural := 0;
+      I : Natural := 25;
+   begin
+      Spot_Count := 0;
+      while I < Tracks.Count and then Spot_Count < Max_Spots loop
+         declare
+            S : constant Sample := Get (I);
+            Side : constant Float := (if K mod 2 = 0 then 1.0 else -1.0);
+            P : constant Geom.Vec := (S.P.X + Geom.Perp (S.T).X * Side * (S.Width / 2.0 + 90.0),
+                                      S.P.Y + Geom.Perp (S.T).Y * Side * (S.Width / 2.0 + 90.0));
+         begin
+            Spot_Count := Spot_Count + 1;
+            Spots (Spot_Count) := (P.X, Base_Y + Land (P) + 45.0, P.Y);
+            K := K + 1;
+            I := I + 50;
+         end;
+      end loop;
+   end Place_Spots;
+
    type Cam_State is record
+      Spot : Natural := 0;   --  the TV camera in use
       H : Float := 0.0;
       Eye, Target : V3;
       Fresh : Boolean := True;
@@ -796,7 +932,9 @@ package body View is
       C : Cars.Car renames Race.State.Racers (Car).Car;
       P : constant Geom.Vec := Interp_P (C, Frame_Alpha);
       H : constant Float := Interp_H (C, Frame_Alpha);
-      Body_Y : constant Float := (if Cars.Falling (C) then Base_Y else Ride (C));
+      Body_Y : constant Float :=
+        (if Cars.Falling (C) then Base_Y + Land (C.P, Race.State.Racers (Car).Index)
+         else Ride (C, Race.State.Racers (Car).Index));
       Rate : constant Float := (if Kind = Bumper then 20.0 else 5.0);
       Eye, Target : V3;
    begin
@@ -812,10 +950,28 @@ package body View is
          if Shared then
             declare
                Mid : constant Geom.Vec := Geom.Lerp (Race.State.Prev_Cam, Race.State.Cam, Frame_Alpha);
-               M : constant V3 := (Mid.X, Base_Y, Mid.Y);
+               M : constant V3 := (Mid.X, Base_Y + Terrain.Hills (Mid), Mid.Y);
             begin
                Eye := M + (0.0, Shared_Height, Shared_Back);
                Target := M;
+            end;
+         elsif Kind = TV and then Spot_Count > 0 then
+            --  the camera beside the track nearest to where the car is going
+            declare
+               Ahead : constant V3 := O + 160.0 * Fwd;
+               Best : Positive := 1;
+            begin
+               for K in 1 .. Spot_Count loop
+                  if Length (Spots (K) - Ahead) < Length (Spots (Best) - Ahead) then
+                     Best := K;
+                  end if;
+               end loop;
+               if Best /= Cm.Spot then
+                  Cm.Spot := Best;
+                  Cm.Fresh := True;   --  a cut
+               end if;
+               Eye := Spots (Best);
+               Target := O + (0.0, 6.0, 0.0);
             end;
          elsif Orbit then
             --  round the leader, slowly, for the title
@@ -840,7 +996,7 @@ package body View is
                      Target := Eye + 120.0 * Real_Fwd + (0.0, 120.0 * Pitch - 4.0, 0.0)
                        + (120.0 * Leans (Car).Roll * 0.3) * Sd;
                   end;
-               when High =>
+               when High | TV =>
                   Eye := O + (0.0, 330.0, 230.0);
                   Target := O;
             end case;
@@ -925,10 +1081,12 @@ package body View is
    procedure New_Track is
    begin
       Art.Build;
+      Terrain.Setup;
       Set_Air;
       Build_World;
       Upload_World_Picture;
       New_Race;
+      Place_Spots;
    end New_Track;
 
    Frame_Times : Float := 0.0;
@@ -989,7 +1147,6 @@ package body View is
       Bind_Framebuffer (GL_FRAMEBUFFER, GLuint (Saved));
    end Make_Shadow_Map;
 
-   Sun : constant V3 := Normal ((0.62, 0.72, 0.42));   --  well up, but low enough for shadows to show
    Light_VP : Mat4;
    Shadow_Center : V3;
 
@@ -1024,6 +1181,8 @@ package body View is
       Bind_Framebuffer (GL_FRAMEBUFFER, GLuint (Saved));
    end Shadow_Pass;
 
+   function Blobs return Boolean is (not (Shadows_Ok and then Shadows_On and then not Night));
+
    procedure Set_Matrix (M : Mat4) is
    begin
       Uniform_Matrix4fv (U_VP, 1, GL_FALSE, M'Address);
@@ -1033,15 +1192,20 @@ package body View is
                           Orbit : Boolean; Dt : Float; Shared : Boolean := False)
    is
       Aspect : constant Float := Float (W) / Float (Natural'Max (1, H));
-      Fov : constant Float := (if Kind in Bumper | Cockpit and then not Orbit then 70.0 else 60.0) * Geom.Pi / 180.0;
+      Fov : constant Float := (if Kind in Bumper | Cockpit and then not Orbit then 70.0
+                               elsif Kind = TV and then not Orbit then 38.0
+                               else 60.0) * Geom.Pi / 180.0;
       LP, LD : array (0 .. 7) of GLfloat_3;
    begin
       Place_Camera (S, Car, Kind, Orbit, Dt, Shared);
+      if S = 1 then
+         Weather_Eye := Cams (1).Eye;
+      end if;
       Build_Particles (Cams (S).Eye, Cams (S).Target);
-      if Shadows_Ok and then not Night then
+      if Shadows_Ok and then Shadows_On and then not Night then
          declare
             C : Cars.Car renames Race.State.Racers (Car).Car;
-            Ahead : constant Float := (if Orbit or else Shared or else Kind = High then 0.0 else 380.0);
+            Ahead : constant Float := (if Orbit or else Shared or else Kind in High | TV then 0.0 else 380.0);
             Fwd : constant V3 := Normal ((Cams (S).Target.X - Cams (S).Eye.X, 0.0, Cams (S).Target.Z - Cams (S).Eye.Z));
          begin
             Shadow_Pass ((C.P.X, Base_Y, C.P.Y) + Ahead * Fwd);
@@ -1078,7 +1242,7 @@ package body View is
          Uniform3fv (U_LD, GLsizei (Light_Count), LD'Address);
       end if;
 
-      Uniform1i (U_Shadow_On, (if not Shadows_Ok or else Night then 0
+      Uniform1i (U_Shadow_On, (if not Shadows_Ok or else not Shadows_On or else Night then 0
                                elsif Ada.Environment_Variables.Exists ("ADAMACHINES_SHADOW_DEBUG") then 2 else 1));
       Uniform1i (U_Shadow, 1);
       Uniform_Matrix4fv (U_Light_VP, 1, GL_FALSE, Light_VP'Address);
@@ -1098,7 +1262,7 @@ package body View is
             P : constant Geom.Vec := Interp_P (C, Frame_Alpha);
             H : constant Float := Interp_H (C, Frame_Alpha);
             Pc : constant Palette.RGB := Palette.Paint (Race.State.Racers (Car).Paint);
-            O : constant V3 := (P.X, Ride (C), P.Y);
+            O : constant V3 := (P.X, Ride (C, Race.State.Racers (Car).Index), P.Y);
          begin
             Reset (Cockpit_B);
             Mesh.Set_Tilt (O, (Cos (H), 0.0, Sin (H)), Leans (Car).Pitch + Leans (Car).Bounce, Leans (Car).Roll);
