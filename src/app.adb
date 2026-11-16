@@ -1977,6 +1977,8 @@ package body App is
          return True;
    end On_Render;
 
+   Broken : Boolean := False;   --  the window could not be set up: the game ends at once
+
    procedure On_Realize (Self : access Gtk_Widget_Record'Class) is
       pragma Unreferenced (Self);
       use type System.Address;
@@ -1984,7 +1986,7 @@ package body App is
       GL_Area_Make_Current (Area_C);
       if GL_Area_Get_Error (Area_C) /= System.Null_Address then
          Ada.Text_IO.Put_Line (Ada.Text_IO.Standard_Error, "Adamachines 3D: no OpenGL 3.3 to be had");
-         Gtk.Main.Main_Quit;
+         Broken := True;
          return;
       end if;
       View.Init;
@@ -1993,7 +1995,7 @@ package body App is
    exception
       when E : others =>
          Ada.Text_IO.Put_Line (Ada.Text_IO.Standard_Error, Ada.Exceptions.Exception_Information (E));
-         Gtk.Main.Main_Quit;
+         Broken := True;
    end On_Realize;
 
    function Tick (Widget : not null access Gtk_Widget_Record'Class;
@@ -2122,7 +2124,9 @@ package body App is
       end if;
       Id := Area.Add_Tick_Callback (Tick'Access);
       pragma Unreferenced (Id);
-      Gtk.Main.Main;
+      if not Broken then
+         Gtk.Main.Main;
+      end if;
       if Net.Role /= Net.Off then
          Net.Stop;
       end if;

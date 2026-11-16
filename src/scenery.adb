@@ -616,7 +616,7 @@ package body Scenery is
                S : constant Sample := Get (I);
                A : constant Float := Pi * Float (K) / Float (Segs);
                Across : constant Geom.Vec := Geom.Perp (S.T);
-               R : constant Float := S.Width / 2.0 + 14.0 + Out_By;
+               R : constant Float := S.Width / 2.0 + 30.0 + Out_By;
                Base : constant Float := Ground_Y + Terrain.Height (S.P, I);
             begin
                return (S.P.X + Across.X * R * Cos (A), Base + (Roof + Out_By) * Sin (A), S.P.Y + Across.Y * R * Cos (A));
@@ -643,13 +643,44 @@ package body Scenery is
                   end loop;
                end;
             end loop;
-            --  the mound over it
+            --  the mound over it: a long hill shaped round the tube, never through it, and a
+            --  face at each end round the mouth
             declare
-               Mid : constant Sample := Get ((Tn.First + Tn.Last) / 2);
-               Long : constant Float := Float (Tn.Last - Tn.First) * Tracks.Spacing / 2.0 - 12.0;
+               Steps : constant Natural := Tn.Last - Tn.First;
+               function Mound (I : Natural; K : Natural) return V3 is
+                  S : constant Sample := Get (I);
+                  T : constant Float := Float (I - Tn.First) / Float (Natural'Max (1, Steps));
+                  A : constant Float := Pi * Float (K) / Float (Segs);
+                  Across : constant Geom.Vec := Geom.Perp (S.T);
+                  Wide : constant Float := S.Width / 2.0 + 30.0 + 150.0;
+                  High : constant Float := Roof + 34.0 + 34.0 * Sin (Pi * T);
+                  Base : constant Float := Ground_Y + Terrain.Height (S.P, I);
+               begin
+                  return (S.P.X + Across.X * Wide * Cos (A), Base + High * Float'Max (0.0, Sin (A)) ** 0.7,
+                          S.P.Y + Across.Y * Wide * Cos (A));
+               end Mound;
+               I : Natural := Tn.First;
             begin
-               Dome (B, (Mid.P.X, Ground_Y + Terrain.Height (Mid.P, (Tn.First + Tn.Last) / 2) - 4.0, Mid.P.Y),
-                     Long, Mid.Width / 2.0 + 150.0, Geom.Angle_Of (Mid.T), 96.0, Earth, 0.0, 24);
+               while I < Tn.Last loop
+                  declare
+                     Nx : constant Natural := Natural'Min (Tn.Last, I + 2);
+                  begin
+                     for K in 0 .. Segs - 1 loop
+                        Quad (B, Mound (I, K), Mound (Nx, K), Mound (Nx, K + 1), Mound (I, K + 1), Earth);
+                     end loop;
+                     I := Nx;
+                  end;
+               end loop;
+               for Ends in 0 .. 1 loop
+                  declare
+                     E : constant Natural := (if Ends = 0 then Tn.First else Tn.Last);
+                  begin
+                     for K in 0 .. Segs - 1 loop
+                        Quad (B, Ring (E, K, 10.0), Mound (E, K), Mound (E, K + 1), Ring (E, K + 1, 10.0),
+                              Shade (Earth, 0.85));
+                     end loop;
+                  end;
+               end loop;
             end;
          end;
       end loop;
