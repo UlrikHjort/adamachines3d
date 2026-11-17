@@ -194,13 +194,29 @@ package body Scenery is
    ---------------------------------------------------------------------------
 
    --  A spot round the world, Near to Far beyond its edge
-   function Around (Near, Far : Float) return V3 is
+   --  How far P is from the world of the track, with a margin round it
+   function Clearance (P : V3) return Float is
+      Margin : constant := 120.0;
+      DX : constant Float := Float'Max (0.0, Float'Max (-Margin - P.X, P.X - (W + Margin)));
+      DZ : constant Float := Float'Max (0.0, Float'Max (-Margin - P.Z, P.Z - (H + Margin)));
+   begin
+      return Sqrt (DX * DX + DZ * DZ);
+   end Clearance;
+
+   --  A spot round the world, Near to Far beyond its edge, for a thing Size across from
+   --  its middle: moved out until none of it reaches the world
+   function Around (Near, Far : Float; Size : Float := 0.0) return V3 is
       A : constant Float := 2.0 * Pi * Rnd;
       D : constant Float := Near + (Far - Near) * Rnd;
       E : constant Float := Float'Max (W, H) * 0.5;
+      P : V3 := (Middle.X + (E + D) * Cos (A) * (W / Float'Max (W, H)), 0.0,
+                 Middle.Z + (E + D) * Sin (A) * (H / Float'Max (W, H)) + D * 0.4 * Sin (A));
+      Out_Dir : constant V3 := Normal ((P.X - Middle.X, 0.0, P.Z - Middle.Z));
    begin
-      return (Middle.X + (E + D) * Cos (A) * (W / Float'Max (W, H)), 0.0,
-              Middle.Z + (E + D) * Sin (A) * (H / Float'Max (W, H)) + D * 0.4 * Sin (A));
+      while Clearance (P) < Size loop
+         P := P + 40.0 * Out_Dir;
+      end loop;
+      return P;
    end Around;
 
    function At_Y (P : V3; Y : Float) return V3 is ((P.X, Y, P.Z));
@@ -235,8 +251,8 @@ package body Scenery is
    begin
       for K in 1 .. Count loop
          declare
-            P : constant V3 := At_Y (Around (Near, Far), Y);
             R : constant Float := Size * (0.6 + 0.8 * Rnd);
+            P : constant V3 := At_Y (Around (Near, Far, R * 1.2), Y);
          begin
             Dome (B, P, R, R * (0.6 + 0.6 * Rnd), 2.0 * Pi * Rnd, R * (0.25 + 0.25 * Rnd),
                   Shade (C, 0.85 + 0.25 * Rnd), 0.0, 18);
@@ -248,8 +264,8 @@ package body Scenery is
    begin
       for K in 1 .. Count loop
          declare
-            P : constant V3 := At_Y (Around (Near, Far), Y);
             R : constant Float := 900.0 + 900.0 * Rnd;
+            P : constant V3 := At_Y (Around (Near, Far, R), Y);
             Ht : constant Float := R * (0.7 + 0.6 * Rnd);
          begin
             Cylinder (B, P, R, R, 0.0, Y, Y + Ht, Shade (Rock, 0.85 + 0.25 * Rnd), 0.0, 12, Cap => False, Taper => 0.0);
@@ -816,8 +832,9 @@ package body Scenery is
                Block (B, (0.0, Top, H / 2.0), (1.0, 0.0, 0.0), 0.0, 0.0, 0.0, 8.0, 12.0, H / 2.0 + 8.0, Rim);
                Block (B, (W, Top, H / 2.0), (1.0, 0.0, 0.0), 0.0, 0.0, 0.0, 8.0, 12.0, H / 2.0 + 8.0, Rim);
                --  the cabinet it stands on
-               Block (B, (W / 2.0, (Y + Fy) / 2.0, H / 2.0), (1.0, 0.0, 0.0), 0.0, 0.0, 0.0, W / 2.0 + 30.0,
-                      (Y - Fy) / 2.0, H / 2.0 + 30.0, Dark_Wood);
+               --  (its top a little under the floor of the tank, or the two would flicker over each other)
+               Block (B, (W / 2.0, (Y - 2.0 + Fy) / 2.0, H / 2.0), (1.0, 0.0, 0.0), 0.0, 0.0, 0.0, W / 2.0 + 30.0,
+                      (Y - 2.0 - Fy) / 2.0, H / 2.0 + 30.0, Dark_Wood);
             end;
          when others =>
             null;
@@ -933,7 +950,7 @@ package body Scenery is
                   when Garden | Easter =>
                      Hills (B, 14, 2500.0, 6000.0, 1800.0, Base, (0.32, 0.55, 0.22, 1.0));
                      for K in 1 .. 26 loop
-                        Leafy_Tree (B, At_Y (Around (500.0, 2200.0), Base), 400.0 + 400.0 * Rnd,
+                        Leafy_Tree (B, At_Y (Around (500.0, 2200.0, 380.0), Base), 400.0 + 400.0 * Rnd,
                                     (0.20, 0.48 + 0.15 * Rnd, 0.15, 1.0));
                      end loop;
                      --  a house far off
@@ -953,7 +970,7 @@ package body Scenery is
                   when Mud =>
                      Hills (B, 16, 2000.0, 6000.0, 2000.0, Base, (0.40, 0.48, 0.25, 1.0));
                      for K in 1 .. 18 loop
-                        Leafy_Tree (B, At_Y (Around (600.0, 2500.0), Base), 450.0 + 400.0 * Rnd,
+                        Leafy_Tree (B, At_Y (Around (600.0, 2500.0, 400.0), Base), 450.0 + 400.0 * Rnd,
                                     (0.25, 0.42 + 0.1 * Rnd, 0.16, 1.0));
                      end loop;
                      declare
@@ -972,7 +989,7 @@ package body Scenery is
                      Hills (B, 5, 3500.0, 7000.0, 1500.0, Base - 100.0, (0.75, 0.70, 0.50, 1.0));
                      for K in 1 .. 3 loop
                         declare
-                           P : constant V3 := At_Y (Around (1200.0, 3000.0), Base);
+                           P : constant V3 := At_Y (Around (1200.0, 3000.0, 160.0), Base);
                         begin
                            Block (B, P, (1.0, 0.0, 0.0), 0.0, 20.0, 0.0, 140.0, 20.0, 45.0, White);
                            Tri (B, P + (-20.0, 40.0, 0.0), P + (100.0, 40.0, 0.0), P + (-20.0, 380.0, 0.0),
@@ -980,13 +997,13 @@ package body Scenery is
                         end;
                      end loop;
                      for K in 1 .. 8 loop
-                        Leafy_Tree (B, At_Y (Around (300.0, 900.0), Base), 500.0, (0.25, 0.55, 0.2, 1.0));
+                        Leafy_Tree (B, At_Y (Around (300.0, 900.0, 260.0), Base), 500.0, (0.25, 0.55, 0.2, 1.0));
                      end loop;
                   when Ice | Arctic =>
                      Mountains (B, 12, 3000.0, 7000.0, Base, (0.55, 0.58, 0.66, 1.0), (0.97, 0.98, 1.0, 1.0));
                      Hills (B, 14, 1000.0, 3500.0, 1500.0, Base, (0.94, 0.96, 1.0, 1.0));
                      for K in 1 .. 30 loop
-                        Fir (B, At_Y (Around (300.0, 2500.0), Base), 500.0 + 500.0 * Rnd, (0.15, 0.35, 0.22, 1.0), True);
+                        Fir (B, At_Y (Around (300.0, 2500.0, 320.0), Base), 500.0 + 500.0 * Rnd, (0.15, 0.35, 0.22, 1.0), True);
                      end loop;
                   when Sky =>
                      --  more clouds round the course, at the planes' height and below
@@ -1009,7 +1026,7 @@ package body Scenery is
                --  bare trees
                for K in 1 .. 20 loop
                   declare
-                     P : constant V3 := At_Y (Around (400.0, 2000.0), Base);
+                     P : constant V3 := At_Y (Around (400.0, 2000.0, 200.0), Base);
                      S : constant Float := 300.0 + 300.0 * Rnd;
                      Bark : constant Color := (0.12, 0.10, 0.12, 1.0);
                   begin
@@ -1048,7 +1065,7 @@ package body Scenery is
                   Hills (B, 16, 1500.0, 6000.0, 1800.0, Base, (0.35, 0.18, 0.40, 1.0));
                   for K in 1 .. 24 loop
                      declare
-                        P : constant V3 := At_Y (Around (400.0, 3000.0), Base);
+                        P : constant V3 := At_Y (Around (400.0, 3000.0, 160.0), Base);
                         S : constant Float := 300.0 + 900.0 * Rnd;
                         Hue : constant Float := 6.0 * Rnd;
                      begin
